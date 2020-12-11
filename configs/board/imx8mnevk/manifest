@@ -1,0 +1,22 @@
+# [general]
+machine=imx8mnevk
+
+# [default firmware images]
+uboot_img=$FBOUTDIR/firmware/u-boot/imx8mnevk/uboot_imx8mn_ddr4_evk.bin
+
+# [linux, dtb, rfs]
+kernel_img=$FBOUTDIR/linux/kernel/arm64/IMX/Image
+device_tree=$FBOUTDIR/linux/kernel/arm64/IMX/imx8mn-ddr4-evk.dtb
+
+# [distro autoboot script]
+distro_bootscript=$FBOUTDIR/firmware/u-boot/imx8mnevk/imx8mnevk_boot.scr
+distroboot=\
+'env exists dtb || setenv dtb imx8mn-ddr4-evk.dtb;'\
+'env exists kernel_image || setenv kernel_image Image;'\
+'env exists devpart_boot || setenv devpart_boot 2;'\
+'env exists devpart_root || setenv devpart_root 4;'\
+'part uuid $devtype $devnum:$devpart_root partuuidr;'\
+'setenv bootargs console=ttymxc1,115200 root=PARTUUID=$partuuidr rw rootwait $othbootargs;'\
+'ext4load mmc $mmcdev:$mmcpart $fdt_addr $fdt_file;'\
+'ext4load mmc $mmcdev:$mmcpart $loadaddr $image;'\
+'booti $loadaddr - $fdt_addr'

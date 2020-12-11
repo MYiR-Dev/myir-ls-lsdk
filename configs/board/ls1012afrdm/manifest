@@ -1,0 +1,35 @@
+# [general]
+machine=ls1012afrdm
+
+# [firmware_images]
+rcw_qspi=$FBOUTDIR/firmware/rcw/ls1012afrdm/N_SSNP_3305/rcw_800.bin.swapped
+uboot_qspiboot=$FBOUTDIR/firmware/u-boot/ls1012afrdm/uboot_ls1012afrdm_qspi.bin
+atf_bl2_qspi=$FBOUTDIR/firmware/atf/ls1012afrdm/bl2_qspi.pbl
+atf_bl2_qspi_sec=$FBOUTDIR/firmware/atf/ls1012afrdm/bl2_qspi_sec.pbl
+atf_fip_uboot=$FBOUTDIR/firmware/atf/ls1012afrdm/fip_uboot.bin
+atf_fip_uboot_sec=$FBOUTDIR/firmware/atf/ls1012afrdm/fip_uboot_sec.bin
+pfe_fw=$FBOUTDIR/firmware/pfe_bin/ls1012a/u-boot/pfe_fw_sbl.itb
+pfe_kernel=$FBOUTDIR/firmware/pfe_bin/ls1012a/slow_path/ppfe*.elf
+
+# [linux, dtb, rfs]
+kernel_img=$FBOUTDIR/linux/kernel/arm64/LS/Image
+device_tree=$FBOUTDIR/linux/kernel/arm64/LS/fsl-ls1012a-frdm.dtb
+
+# [distro autoboot script]
+distro_bootscript=$FBOUTDIR/firmware/u-boot/ls1012afrdm/ls1012afrdm_boot.scr
+
+
+distroboot=\
+'env exists dtb || setenv dtb fsl-ls1012a-frdm.dtb;'\
+'env exists kernel_image || setenv kernel_image Image;'\
+'env exists devpart_boot || setenv devpart_boot 2;'\
+'env exists devpart_root || setenv devpart_root 4;'\
+'part uuid $devtype $devnum:$devpart_root partuuidr;'\
+'setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 root=PARTUUID=$partuuidr rw rootwait $othbootargs;'\
+'load $devtype $devnum:$devpart_boot $kernel_addr_r $kernel_image;'\
+'load $devtype $devnum:$devpart_boot $fdt_addr_r $dtb;'\
+'env exists secureboot && echo validating secureboot && run secureboot_validate;'\
+'booti $kernel_addr_r - $fdt_addr_r'
+
+# [secure boot scripts in cst]
+qspi_script=scripts/platforms/ls104x_1012_qspi.sh

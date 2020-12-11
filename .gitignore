@@ -1,0 +1,19 @@
+# Build products
+build
+logs
+packages/apps/*
+!packages/apps/Makefile
+packages/apps/eiq/*
+!packages/apps/eiq/eiq.mk
+packages/firmware/*
+!packages/firmware/Makefile
+packages/linux/*
+!packages/linux/Makefile
+packages/rfs/*
+!packages/rfs/misc
+!packages/rfs/Makefile
+.bash*
+*.tgz
+*.log
+*.o
+

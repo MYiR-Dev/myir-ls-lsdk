@@ -1,0 +1,23 @@
+# [general]
+machine=imx7ulpevk
+
+# [default firmware images]
+uboot_img=$FBOUTDIR/firmware/u-boot/imx7ulpevk/uboot_mx7ulp_evk.imx
+
+# [linux, dtb, rfs]
+kernel_img=$FBOUTDIR/linux/kernel/arm32/IMX/uImage
+device_tree=$FBOUTDIR/linux/kernel/arm32/IMX/imx7ulp-evk.dtb
+
+# [distro autoboot script]
+distro_bootscript=$FBOUTDIR/firmware/u-boot/imx7ulpevk/imx7ulp_boot.scr
+distroboot=\
+'env exists dtb || setenv dtb imx7ulp-evk.dtb;'\
+'env exists kernel_image || setenv kernel_image zImage;'\
+'env exists devpart_boot || setenv devpart_boot 2;'\
+'env exists devpart_root || setenv devpart_root 4;'\
+'part uuid $devtype $devnum:$devpart_root partuuidr;'\
+'setenv bootargs console=ttyLP0,115200  root=PARTUUID=$partuuidr rw rootwait;'\
+'load $devtype $devnum:$devpart_boot $kernel_addr_r $kernel_image;'\
+'load $devtype $devnum:$devpart_boot $fdt_addr_r $dtb;'\
+'env exists secureboot && echo validating secureboot && run secureboot_validate;'\
+'bootz $kernel_addr_r - $fdt_addr_r'

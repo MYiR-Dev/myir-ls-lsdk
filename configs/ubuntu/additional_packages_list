@@ -1,0 +1,75 @@
+# dependent packages installed on host for the environment of build
+host_dependent_packages="git u-boot-tools device-tree-compiler ccache autoconf automake locales
+  binfmt-support qemu-system-common qemu-user-static debootstrap crossbuild-essential-arm64
+  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu crossbuild-essential-armhf gcc-arm-linux-gnueabihf
+  cpp-arm-linux-gnueabihf g++-arm-linux-gnueabihf dh-autoreconf libssl-dev openssl flex bc rsync
+  bison qemu-utils libncurses5-dev gawk scons python3-crypto libpcap-dev curl parted cmake sshfs
+  libicu-dev libtclap-dev rpm2cpio xutils-dev libwayland-bin diffstat pkg-config texinfo chrpath
+  python3 python3-dev python3-pip python3-wheel python3-h5py lib32z1 libhdf5-serial-dev libc6-i386
+  lib32stdc++6 python3-numpy libgflags-dev ninja-build pkg-config-aarch64-linux-gnu
+  python3-pyelftools"
+
+
+# additional packages list for target LSDK main userland gathered from main repo
+additional_main_packages_list="apt apt-utils git gcc vim wget make build-essential u-boot-tools
+  device-tree-compiler python3 python3-dev python3-numpy ethtool zip libxml2-dev libsensors4-dev
+  libedit-dev liblzma-dev binutils-dev autoconf automake dh-autoreconf libnuma-dev libpcap-dev
+  bc qemu-kvm bridge-utils libtool libncurses5-dev bison libelf-dev curl flex autotools-dev ftp
+  openssh-server openssh-client tcpdump vlan ifenslave linux-tools-generic tftp-hpa tftpd-hpa
+  strace debootstrap mdadm vsftpd telnet sysstat rdate initramfs-tools mtd-utils dosfstools pciutils
+  net-tools iputils-ping hdparm psmisc keyutils software-properties-common efibootmgr libssl-dev
+  ca-certificates libnl-genl-3-dev libreadline-dev libffi-dev libudev-dev libinput-dev libpixman-1-dev
+  libxkbcommon-dev libpng-dev libcairo2-dev libpam0g-dev lsb-release kexec-tools iptables rsync
+  liblua5.3-dev parted strongswan dmidecode libsystemd-dev libxcb-composite0-dev libxcursor-dev
+  libtinfo-dev util-linux lvm2"
+
+
+
+# for target devel userland gathered packages from Ubuntu main/universe/multiverse/restricted besides additional_main_packages_list
+additional_devel_packages_list="makedev tree lxc lxd virt-manager lm-sensors i2c-tools fio rt-tests
+  libcunit1-dev python3-pip iperf netperf hugepages blktrace sysfsutils cpufrequtils iozone3 busybox
+  ipsec-tools lmbench watchdog libtclap-dev lttng-tools xterm can-utils python3-virtualenv gdb
+  memtester usbutils linuxptp netdata redis-server libhdf5-serial-dev python3-wheel python3-h5py
+  scons mmc-utils"
+
+
+
+# for target Lite userland gathered from Ubuntu main repo
+additional_lite_packages_list="systemd udev wget net-tools iputils-ping isc-dhcp-client libxml2-dev
+  libnl-genl-3-dev libreadline-dev libtinfo-dev sudo"
+
+
+
+# for target Ubuntu Mate userland
+additional_mate_packages_list="curl libnl-genl-3-dev libreadline-dev libtinfo-dev libffi-dev libexpat1-dev
+  libxml2-dev libudev-dev libinput-dev libpixman-1-dev libxkbcommon-dev libpng-dev libcairo2-dev libpam0g-dev
+  libsystemd-dev libxcb-composite0-dev libxcursor-dev net-tools"
+
+
+
+# additional Python pip package for Ubuntu devel userland
+additional_python_pip_packages_list="six flask flask_socketio"
+
+
+# additional packages for target cloud userland, for openstack-nova if CONFIG_APP_OPENSTACK_NOVA is enabled
+openstack_dependent_packages_list="python3-pbr python3-sqlalchemy python3-decorator python3-eventlet
+  python3-jinja2 python3-keystonemiddleware python3-lxml python3-routes python3-cryptography python3-webob
+  python3-greenlet python3-pastedeploy python3-paste python3-prettytable python3-migrate python3-netaddr
+  python3-netifaces python3-paramiko python3-babel python3-enum34 python3-iso8601 python3-jsonschema
+  python3-cinderclient python3-keystoneauth1 python3-neutronclient python3-glanceclient python3-requests
+  python3-six python3-stevedore python3-setuptools python3-websockify python3-oslo.cache python3-oslo.concurrency
+  python3-oslo.config python3-oslo.context python3-oslo.log python3-oslo.reports python3-oslo.serialization
+  python3-oslo.utils python3-oslo.db python3-oslo.rootwrap python3-oslo.messaging python3-oslo.policy
+  python3-oslo.privsep python3-oslo.i18n python3-oslo.service python3-rfc3986 python3-oslo.middleware
+  python3-psutil python3-oslo.versionedobjects python3-os-brick python3-os-traits python3-os-vif python3-os-win
+  python3-castellan python3-microversion-parse python3-os-xenapi python3-tooz python3-cursive python3-pypowervm
+  qemu-efi-aarch64"
+
+
+
+# source packages depended by some custom components.
+source_packages_list="iproute2"
+
+
+# extrinsic package needed by user but unavailable from official ubuntu
+extrinsic_packages_list=""

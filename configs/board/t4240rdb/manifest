@@ -1,0 +1,28 @@
+# [general]
+machine=t4240rdb
+
+# [firmware images]
+rcw_nor=$FBOUTDIR/firmware/rcw/t4240rdb/SSFFPPH_27_55_1_9/rcw_27_55_1_9_1800MHz.bin
+uboot_norboot=$FBOUTDIR/firmware/u-boot/t4240rdb/uboot_T4240RDB.bin
+uboot_sdboot=$FBOUTDIR/firmware/u-boot/t4240rdb/uboot_T4240RDB_SDCARD.bin
+fman_ucode=$FBOUTDIR/firmware/fm_ucode/fsl_fman_ucode_t4240_r2.0_106_4_18.bin
+phy_firmware=$FBOUTDIR/firmware/phy_cortina/cs4315-cs4340-PHY-ucode.txt
+
+# [linux, dtb, rfs]
+kernel_img=$FBOUTDIR/linux/kernel/ppc64/Image.gz
+device_tree=$FBOUTDIR/linux/kernel/ppc64/t4240rdb.dtb
+
+
+# [distro autoboot script]
+distro_bootscript=$FBOUTDIR/firmware/u-boot/t4240rdb/t4240rdb_boot.scr
+distroboot=\
+'env exists dtb || setenv dtb t4240rdb.dtb;'\
+'env exists kernel_image || setenv kernel_image uImage;'\
+'env exists devpart_boot || setenv devpart_boot 2;'\
+'env exists devpart_root || setenv devpart_root 4;'\
+'part uuid $devtype $devnum:$devpart_root partuuidr;'\
+'setenv bootargs console=ttyS0,115200 root=PARTUUID=$partuuidr rw rootwait $othbootargs;'\
+'load $devtype $devnum:$devpart_boot $kernel_addr_r $kernel_image;'\
+'load $devtype $devnum:$devpart_boot $fdt_addr_r $dtb;'\
+'env exists secureboot && echo validating secureboot && run secureboot_validate;'\
+'bootm $kernel_addr_r - $fdt_addr_r'

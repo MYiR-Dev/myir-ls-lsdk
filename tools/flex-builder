@@ -1,0 +1,2622 @@
+#!/bin/bash
+
+# Copyright 2017-2020 NXP
+#
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Author: Shengzhou Liu <shengzhou.liu@nxp.com>
+#
+
+set -e
+
+# set default env
+JOBS=$(nproc)
+ARCH=arm64
+FBVERSION=2.5.2012
+
+usage () {
+cat <<EOF
+Usage: flex-builder -m <machine>
+   or  flex-builder -c <component>   [-m <machine>] [-a <arch>] [-b <boottype>] [-f cfg-file]
+   or  flex-builder -i <instruction> [-m <machine>] [-a <arch>] [-r <distro_type>:<distro_scale>] [-f cfg-file]
+
+Most used example with automated build:
+ flex-builder -m ls1046ardb      	     # automatically build all firmware, linux, apps components and distro userland for ls1046ardb
+ flex-builder -i auto -a arm64	             # automatically build all firmware, linux, apps components and distro userland for all arm64 machines
+
+Most used example with separate command:
+ flex-builder -i mkrfs    	             # generate Ubuntu main arm64 userland, '-r ubuntu:main -a arm64' by default
+ flex-builder -i mkrfs -r ubuntu:lite        # generate Ubuntu lite arm64 userland
+ flex-builder -i mkrfs -r yocto:tiny         # generate Yocto-based arm64 tiny userland
+ flex-builder -i mkrfs -r buildroot:tiny     # generate Buildroot-based arm64 tiny userland
+ flex-builder -i mkrfs -r centos             # generate CentOS arm64 userland
+ flex-builder -i mkitb -r yocto:tiny         # generate lsdk_yocto_tiny_LS_arm64.itb including rootfs_lsdk_yocto_tiny_arm64.cpio.gz
+ flex-builder -c linux -a arm64	             # build linux kernel as per the default linux repo and branch/tag for all arm64 machines
+ flex-builder -c atf -m ls1046ardb -b sd     # build ATF images for SD boot on LS1046ardb
+ flex-builder -i mkfw -m ls1046ardb -b sd    # generate composite firmware for SD boot on ls1046ardb
+ flex-builder -i mkboot -a arm64             # generate boot partition tarball bootpartition_LS_arm64_lts.tgz for deployment
+ flex-builder -c apps                        # build all apps components(dpdk, fmc, restool, tsntool, optee_os, openssl, secure_obj, etc)
+ flex-builder -i merge-component             # merge component packages into target arm64 userland
+ flex-builder -i packrfs         	     # pack and compress target rootfs as rootfs_lsdk2012_ubuntu_main.tgz
+ flex-builder -i packapp                     # pack and compress target app components as app_components_LS_arm64.tgz
+ flex-builder -i download -m ls1043ardb      # download prebuilt distro images for specific machine
+ flex-builder -c eiq                         # build eIQ AI/ML components (armnn,tensorflow,tflite,caffe,opencv,armcl,flatbuffer,protobuf,onnx,etc)
+ flex-builder -i repo-fetch		     # fetch all git repositories of components from remote repos if not exist locally
+ flex-builder -i repo-update                 # update all components to the latest TOP commmits of current branches
+ flex-builder -i mkdistroscr                 # generate distro boot script
+ flex-builder docker			     # create or attach Ubuntu docker container to run flex-builder in docker
+ flex-builder clean			     # clean all obsolete firmware/linux/apps image except distro rootfs
+ flex-builder clean-rfs                      # clean distro rootfs, '-r ubuntu:main -a arm64' by default
+ flex-builder clean-firmware                 # clean obsolete firmware image
+ flex-builder clean-linux                    # clean obsolete linux image
+
+Most used options:
+ -m, --machine	       target machine, supports ls1012afrwy,ls1021atwr,ls1028ardb,ls1043ardb,ls1046ardb,ls1088ardb_pb,ls2088ardb,lx2160ardb_rev2,lx2162aqds,etc
+ -a, --arch	       target arch of processor, valid argument: arm64, arm64:be, arm32, arm32:be, ppc64, ppc32, arm64 by default
+ -b, --boottype	       type of boot media, valid argument: nor, sd, emmc, qspi, xspi, nand, default all types if unspecified
+ -c, --component       component to be built, valid argument: firmware, apps, linux, atf, rcw, multimedia, networking, security, eiq,
+		       weston, fmc, tsntool, openssl, vpp, dpdk, ovs_dpdk, pktgen_dpdk, openssl, optee_os, libpkcs11, secure_obj, etc
+ -r, --rootfs          specify flavor of target rootfs, valid argument: ubuntu|yocto|centos:main|devel|lite|tiny
+ -i, --instruction     instruction to do for dedicated function
+ -s, --secure	       enable security feature in case of secure boot
+
+See docs/flexbuild_usage.txt and docs/build_and_deploy_distro.md for more information about the available commands.
+
+EOF
+   exit
+}
+
+
+check_build_toolchain() {
+    expected_tc_version=7
+    if [ $DESTARCH = arm32 ] && [ $HOSTARCH = x86_64 -o $HOSTARCH = aarch64 -o $HOSTARCH = i686 ]; then
+	[ -f /usr/bin/arm-linux-gnueabihf-gcc ] && gccversion=$(arm-linux-gnueabihf-gcc --version | head -1 | cut -d' ' -f4) || gccversion=0
+	gccversion=${gccversion:0:1}
+	if [ $gccversion = 0 ]; then
+	    fbprint_w "Installing toolchain for arm32 ..."
+	    sudo apt install -y crossbuild-essential-armhf gcc-arm-linux-gnueabihf cpp-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+	elif [ $gccversion != $expected_tc_version ]; then
+	    fbprint_w "The existing toolchain version $gccversion.x is not tested in this distro"
+	    fbprint_w "Please build on Ubuntu $fbdockerimgversion host or in docker to use the verified toolchain"
+	    exit
+	fi
+	export ARCH=arm
+	export CROSS_COMPILE=arm-linux-gnueabihf-
+    elif [ $DESTARCH = arm64 ] && [ $HOSTARCH = x86_64 -o $HOSTARCH = armv7l -o $HOSTARCH = i686 ]; then
+	[ -f /usr/bin/aarch64-linux-gnu-gcc ] && gccversion=$(aarch64-linux-gnu-gcc --version | head -1 | cut -d' ' -f4) || gccversion=0
+	gccversion=${gccversion:0:1}
+	if [ $gccversion = 0 ]; then
+	    fbprint_w "Installing toolchain for arm64 ..."
+	    sudo apt install -y crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+	elif [ $gccversion != $expected_tc_version ]; then
+	    fbprint_w "The existing toolchain version $gccversion.x is not tested in this distro"
+	    fbprint_w "Please build on Ubuntu $fbdockerimgversion host or in docker to use the verified toolchain"
+	    exit
+	fi
+	export ARCH=arm64
+	export CROSS_COMPILE=aarch64-linux-gnu-
+    elif [ $DESTARCH = ppc32 ] && [ $HOSTARCH = x86_64 -o $HOSTARCH = i686 ]; then
+	if [ ! -f ${RFSDIR%/*}/host/bin/powerpc-linux-gcc ]; then
+	    echo Building powerpc-linux-gcc toolchain ...
+	    build_distro_rfs_buildroot toolchain ppc32
+	fi
+	export PATH=${RFSDIR%/*}/host/bin:$PATH
+	export ARCH=powerpc
+	export CROSS_COMPILE=powerpc-linux-
+    elif [ $DESTARCH = ppc64 ] && [ $HOSTARCH = x86_64 -o $HOSTARCH = i686 ]; then
+	if [ -z "$INSTRUCTION" -a -n $COMPONENT ] && [ ! -f ${RFSDIR%/*}/host/bin/powerpc64-linux-gcc ]; then
+	    echo Building powerpc64-linux-gcc toolchain ...
+	    build_distro_rfs_buildroot toolchain ppc64
+	fi
+	export PATH=${RFSDIR%/*}/host/bin:$PATH
+	export ARCH=powerpc
+	export CROSS_COMPILE=powerpc64-linux-
+    elif [ $HOSTARCH = aarch64 -o $HOSTARCH = armv7l ]; then
+	if [ $DESTARCH = arm32 ]; then
+	    export ARCH=arm
+	elif [ $DESTARCH = arm64 ]; then
+	    export ARCH=arm64
+	elif [ $DESTARCH = ppc64 ]; then
+	    export ARCH=powerpc
+	fi
+	export CROSS_COMPILE=
+    fi
+}
+
+
+generate_qoriq_composite_firmware() {
+    # generate machine-specific firmware to be programmed to NOR/SD media
+    # $1: machine name
+    # $2: boot type: sd, qspi, xspi, nor, nand
+    # $3: bootloader type: uboot or uefi
+
+    [ ! -f $FBDIR/configs/board/$1/manifest ] && echo $FBDIR/configs/board/$1/manifest not exist! && exit 1
+    . $FBDIR/configs/board/$1/manifest
+
+    if [ "$SECURE" = "y" ]; then
+	fwimg=$FBOUTDIR/images/firmware_${1}_${3}_${BOOTTYPE}boot_secure
+	rcwimg=`eval echo '${'"rcw_""$2"'_sec}'`
+	bootloaderimg=`eval echo '${'"$3"'_'"$2"'boot_sec}'`
+	bl2img=`eval echo '${'"atf_bl2_""$2"'_sec}'`
+	fipimg=`eval echo '${'"atf_fip_""$3"'_sec}'`
+	sechdr=`eval echo '${'"secureboot_headers_""$2"'}'`
+	if [ "$COT" = "arm-cot-with-verified-boot" ]; then
+	    fipimg=$atf_fip_sec_verified_boot; fwimg=${fwimg}_verified_boot
+	    [ -f $fipimg ] || flex-builder -c atf -m $1 -s -T $COT -f $CONFIGLIST
+	fi
+    else
+	fwimg=$FBOUTDIR/images/firmware_${1}_${3}_${BOOTTYPE}boot
+	rcwimg=`eval echo '${'"rcw_""$2"'}'`
+	bootloaderimg=`eval echo '${'"$3"'_'"$2"'boot}'`
+	bl2img=`eval echo '${'"atf_bl2_""$2"'}'`
+	fipimg=`eval echo '${'"atf_fip_""$3"'}'`
+    fi
+    [ -f $fwimg ] && rm -f $fwimg
+
+    if [ -z "$bootloaderimg" -a ${1:0:7} = ls1021a ] || [ -z "$bl2img" -a ${1:0:7} != ls1021a ] || \
+       [ -z "$bootloaderimg" -a $3 = uefi ] || [ -z "$rcwimg" -a $1 = ls1021atwr -a "$SECURE" != "y" ]; then
+	[ "$SECURE" = "y" ] && echo ${3}_${2}boot_sec on $1: unsupported! || echo ${3}_${2}boot on $1: unsupported!
+	exit
+    fi
+    [ -n "$rcw_bin" ] && rcwimg=$FBOUTDIR/firmware/rcw/$rcw_bin
+    if [ -n "$fipimg" -a -n "$bl2img" ]; then
+	[ ! -f $bl2img -o ! -f $fipimg ] && flex-builder -c atf -m $1 -b $2 $secureopt -f $CONFIGLIST
+    fi
+    if [ ! -f $fipimg ] || [ ! -f $bl2img ]; then
+       echo ${3} ${2}boot on $1 is not supported! && exit
+    fi
+
+    [ -z "$sechdr" -a "$SECURE" = y ] && echo secure ${2}boot on $1: unsupported && exit
+    [ ! -f $rcwimg ] && flex-builder -c rcw -m $1 -f $CONFIGLIST
+    echo "Generating $2boot composite firmware image for $1 ..."
+
+    if [ ${1:0:7} = ls1021a -a -n "$bootloaderimg" ] && [ ! -f $bootloaderimg ]; then
+	echo $bootloaderimg not exist, generating it ...
+	flex-builder -c uboot -m $1 -b $2 -f $CONFIGLIST
+    fi
+
+    [ -n "$fman_ucode" ] && [ ! -f $fman_ucode ] && flex-builder -c fm_ucode -f $CONFIGLIST
+    [ -n "$qe_firmware" ] && [ ! -f $qe_firmware ] && flex-builder -c qe_ucode -f $CONFIGLIST
+    [ -n "$dp_firmware" ] && [ ! -f $dp_firmware ] && flex-builder -c dp_firmware_cadence -f $CONFIGLIST
+    [ -n "$phy_firmware" ] && [ ! -f $phy_firmware ] && flex-builder -c bin_firmware -f $CONFIGLIST || true
+    [ ! -f $kernel_img ] && generate_kernel_img || true
+
+    [ ! -f ${tiny_itb} ] && echo ${tiny_itb} not exist, generating it ... && \
+    flex-builder -i mklinux -r yocto:tiny -a $DESTARCH -p $SOCFAMILY -f $CONFIGLIST
+
+    [ -f $distro_bootscript ] || flex-builder -i mkdistroscr -m $1 -a $DESTARCH -f $CONFIGLIST
+    [ "$IMA_EVM" = y -a ! -f $bootscript_enforce ] && flex-builder -i mkdistroscr -m $1 -t -f $CONFIGLIST
+    [ "$ENCAP" = y -a ! -f $bootscript_dec ] && flex-builder -i mkdistroscr -m $1 -e -f $CONFIGLIST
+
+    secureboot_headers=`eval echo '${'"secureboot_headers_""$2"'}'`
+    if [ "$SECURE" = y -a $SOCFAMILY = LS -a -n "$secureboot_headers" ]; then
+	# sign images
+	flex-builder -i signimg -m $1 -b $2 -a $DESTARCH -f $CONFIGLIST $secureopt
+    fi
+
+    if [ ${1:0:7} = ls1021a ]; then
+	# for machine which doesn't support ATF
+	if [ $2 = sd -o $2 = emmc ]; then
+	    # rcw and uboot/uefi in single image
+	    dd if=$bootloaderimg of=$fwimg bs=512 seek=$sd_rcw_bootloader_offset
+	else
+	    # program rcw
+	    if [ -z "$rcwimg" ]; then echo ${3} ${2}boot on $1 is not supported!; exit; fi
+	    dd if=$rcwimg of=$fwimg bs=1K seek=0
+	    # program u-boot image
+	    val=`expr $(echo $(($nor_bootloader_offset))) / 1024`
+	    dd if=$bootloaderimg of=$fwimg bs=1K seek=$val
+	fi
+    else
+	# ATF BL2 image
+	[ $2 = sd -o $2 = emmc ] && dd if=$bl2img of=$fwimg bs=512 seek=$sd_rcw_bootloader_offset || \
+	dd if=$bl2img of=$fwimg bs=1K seek=0
+
+	# ATF FIP image
+	if [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$fipimg of=$fwimg bs=512 seek=$sd_bootloader_offset
+	else
+	    val=`expr $(echo $(($nor_bootloader_offset))) / 1024`
+	    dd if=$fipimg of=$fwimg bs=1K seek=$val
+	fi
+    fi
+
+    # bootloader environment varialbe
+    if [ $3 = uefi ]; then
+	if [ -n "$uefi_env" ]; then
+	    if [ $2 = nor -o $2 = qspi -o $2 = xspi ]; then
+		val=`expr $(echo $(($nor_bootloader_env_offset))) / 1024`
+		dd if=$uefi_env of=$fwimg bs=1K seek=$val
+	    elif [ $2 = sd -o $2 = emmc ]; then
+		dd if=$uefi_env of=$fwimg bs=512 seek=$sd_bootloader_env_offset
+	    fi
+	fi
+    fi
+
+    # secure boot headers
+    if [ -n "$secureboot_headers" -a "$SECURE" = y ]; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_secureboot_headers_offset))) / 1024`
+	    dd if=$secureboot_headers of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$secureboot_headers of=$fwimg bs=512 seek=$sd_secureboot_headers_offset
+	fi
+    fi
+
+    # DDR PHY firmware
+    if [ ${1:0:5} = lx216 ]; then
+	if [ "$SECURE" = "y" -a ! -f $ddr_phy_fw_sec ]; then
+	    flex-builder -c atf -m $1 -b $2 -s -f $CONFIGLIST
+	elif [ ! -f $ddr_phy_fw ]; then
+	    flex-builder -c ddr_phy_bin -f $CONFIGLIST
+	fi
+	[ "$SECURE" = y ] && ddrphyfw=$ddr_phy_fw_sec || ddrphyfw=$ddr_phy_fw
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_ddr_phy_fw_offset))) / 1024`
+	    dd if=$ddrphyfw of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$ddrphyfw of=$fwimg bs=512 seek=$sd_ddr_phy_fw_offset
+	fi
+    fi
+
+    # fuse provisioning in case CONFIG_FUSE_PROVISIONING is enabled
+    if [ "$CONFIG_FUSE_PROVISIONING" = y -a ${1:0:7} != ls1021a ]; then
+	if [ "$SECURE" = "y" ]; then
+	    fuse_header=$FBOUTDIR/firmware/atf/$1/fuse_fip_sec.bin
+	else
+	    fuse_header=$FBOUTDIR/firmware/atf/$1/fuse_fip.bin
+	fi
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_fuse_headers_offset))) / 1024`
+	    dd if=$fuse_header of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$fuse_header of=$fwimg bs=512 seek=$sd_fuse_headers_offset
+	fi
+    fi
+
+    # DPAA1 FMan ucode firmware
+    if [ -n "$fman_ucode" ]; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_fman_ucode_offset))) / 1024`
+	    dd if=$fman_ucode of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$fman_ucode of=$fwimg bs=512 seek=$sd_fman_ucode_offset
+	fi
+    fi
+
+    # QE/uQE firmware
+    if [ -n "$qe_firmware" ] ; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_qe_firmware_offset))) / 1024`
+	    dd if=$qe_firmware of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$qe_firmware of=$fwimg bs=512 seek=$sd_qe_firmware_offset
+	fi
+    fi
+
+    # DP (Display Port) firmware
+    if [ -n "$dp_firmware" ] && [ -f $dp_firmware ] && [ ${1:0:7} = ls1028a ]; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	   val=`expr $(echo $(($nor_dp_firmware_offset))) / 1024`
+	   dd if=$dp_firmware of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	   dd if=$dp_firmware of=$fwimg bs=512 seek=$sd_dp_firmware_offset
+	fi
+    fi
+
+    # ethernet phy firmware
+    if [ -n "$phy_firmware" ] ; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_phy_firmware_offset))) / 1024`
+	    dd if=$phy_firmware of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$phy_firmware of=$fwimg bs=512 seek=$sd_phy_firmware_offset
+	fi
+    fi
+
+    # flashing image script
+    [ -f $FBOUTDIR/images/flash_images.scr ] ||	\
+    mkimage -T script -C none -d $FBDIR/tools/flash_images.sh $FBOUTDIR/images/flash_images.scr
+
+    if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	val=`expr $(echo $(($nor_uboot_scr_offset))) / 1024`
+	dd if=$FBOUTDIR/images/flash_images.scr of=$fwimg bs=1K seek=$val
+    elif [ $2 = sd -o $2 = emmc ]; then
+	dd if=$FBOUTDIR/images/flash_images.scr of=$fwimg bs=512 seek=$sd_uboot_scr_offset
+    fi
+
+    # DPAA2-MC or PFE firmware
+    if [ -n "$dpaa2_mc_fw" ] ; then
+	[ -d $FBOUTDIR/firmware/mc_bin ] || flex-builder -c mc_bin -f $CONFIGLIST
+	fwbin=`ls $dpaa2_mc_fw`
+    elif [ -n "$pfe_fw" ] ; then
+	fwbin=$pfe_fw
+	[ -f $pfe_fw ] || flex-builder -c pfe_bin -f $CONFIGLIST
+    fi
+    if [ -n "$fwbin" ]; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_dpaa2_mc_fw_offset))) / 1024`
+	    dd if=$fwbin of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$fwbin of=$fwimg bs=512 seek=$sd_dpaa2_mc_fw_offset
+	fi
+    fi
+
+    # DPAA2 DPL firmware
+    if [ -n "$dpaa2_mc_dpl" ] ; then
+	[ -f $dpaa2_mc_dpl ] || flex-builder -c mc_utils -f $CONFIGLIST
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_dpaa2_mc_dpl_offset))) / 1024`
+	    dd if=$dpaa2_mc_dpl of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$dpaa2_mc_dpl of=$fwimg bs=512 seek=$sd_dpaa2_mc_dpl_offset
+	fi
+    fi
+
+    # DPAA2 DPC firmware
+    if [ -n "$dpaa2_mc_dpc" ] ; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_dpaa2_mc_dpc_offset))) / 1024`
+	    dd if=$dpaa2_mc_dpc of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$dpaa2_mc_dpc of=$fwimg bs=512 seek=$sd_dpaa2_mc_dpc_offset
+	fi
+    fi
+
+    # device tree image
+    if [ -n "$device_tree" ] ; then
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor_device_tree_offset))) / 1024`
+	    dd if=$device_tree of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$device_tree of=$fwimg bs=512 seek=$sd_device_tree_offset
+	fi
+    fi
+
+    # linux tiny itb
+    if [ "$COT" = "arm-cot-with-verified-boot" ]; then
+	itbimg=$FBOUTDIR/images/linux_LS_arm64_signature.itb
+	flex-builder -c atf -m $1 -b $2 -T arm-cot-with-verified-boot -f $CONFIGLIST
+    else
+	itbimg=${tiny_itb}
+    fi
+    if [ $2 = qspi ] && [ $1 = ls1021atwr -o $1 = ls1043aqds ]; then
+	echo no itb in $1 composite firmware as $1 $2 flash no more than 16MiB
+    elif [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	val=`expr $(echo $(($nor_kernel_offset))) / 1024`
+	dd if=$itbimg of=$fwimg bs=1K seek=$val
+    elif [ $2 = sd -o $2 = emmc ]; then
+	dd if=$itbimg of=$fwimg bs=512 seek=$sd_kernel_offset
+    fi
+
+    [ $2 = sd -o $2 = emmc ] && tail -c +4097 $fwimg > $fwimg.img && rm $fwimg || mv $fwimg $fwimg.img
+    echo -e "${GREEN} $fwimg.img   [Done]\n${NC}"
+}
+
+generate_imx_composite_firmware() {
+    # $1: machine name
+    echo "Generating composite firmware for $1 ..."
+    [ ! -f $FBDIR/configs/board/$1/manifest ] && echo $FBDIR/configs/board/$1/manifest not exist! && exit 1
+    . $FBDIR/configs/board/$1/manifest && bootloaderimg=${uboot_img}
+    fwimg=$FBOUTDIR/images/firmware_${1}
+
+    [ ! -f $bootloaderimg ] && echo $bootloaderimg not exist, generating it ... && \
+    flex-builder -c uboot -m $1 -p imx -f $CONFIGLIST
+
+    [ ! -f $tiny_itb ] && echo $tiny_itb not exist, generating it ... && \
+    flex-builder -i mklinux -r yocto:tiny -a $DESTARCH -p imx -f $CONFIGLIST
+
+    # bootloader
+    if [ "${1:0:4}" = "imx6" -o "${1:0:4}" = "imx7" ];then
+        imx_uboot_offset=$imx_uboot_offset_1k
+    elif [ "${1:0:6}" = "imx8mq" -o "${1:0:6}" = "imx8mm" ];then
+        imx_uboot_offset=$imx_uboot_offset_33k
+    else
+        imx_uboot_offset=$imx_uboot_offset_32k
+    fi
+    dd if=$bootloaderimg of=$fwimg bs=1k seek=$imx_uboot_offset
+
+    # linux itb image
+    dd if=${tiny_itb} of=$fwimg bs=1k seek=$imx_itb_offset
+
+    start_offset=$[ $imx_uboot_offset * 1024 + 1 ]
+    tail -c +$start_offset $fwimg > $fwimg.img && rm -f $fwimg
+    echo -e "${GREEN} $fwimg.img  [Done]\n${NC}"
+}
+
+generate_composite_firmware() {
+    check_machine_boottype
+    [ -z "$BUILDARG" ] && BUILDARG=uboot
+    if [ "$MACHINE" = all ]; then
+	for brd in $LS_MACHINE_LIST; do
+	    . $FBDIR/configs/board/$brd/manifest
+	    if [ $brd = ls1012afrwy ]; then
+		generate_composite_fw_2M $brd $BOOTTYPE $BUILDARG
+		generate_composite_fw_2M $brd $BOOTTYPE $BUILDARG 512mb
+	    else
+		if [ $SOCFAMILY = LS ]; then
+		    generate_qoriq_composite_firmware $brd $BOOTTYPE $BUILDARG
+		elif [ $SOCFAMILY = IMX ]; then
+		    generate_imx_composite_firmware $brd
+		fi
+	    fi
+	done
+    elif [ "$MACHINE" = ls1012afrwy ]; then
+	generate_composite_fw_2M $MACHINE $BOOTTYPE $BUILDARG
+	generate_composite_fw_2M $MACHINE $BOOTTYPE $BUILDARG 512mb
+    elif [ $SOCFAMILY = LS ]; then
+	generate_qoriq_composite_firmware $MACHINE $BOOTTYPE $BUILDARG
+    elif [ $SOCFAMILY = IMX ]; then
+	generate_imx_composite_firmware $MACHINE
+    fi
+}
+
+generate_initrd_cpio() {
+    [ -f $RFSDIR/etc/buildinfo ] || flex-builder -i mkrfs -r $DISTROTYPE:$DISTROSCALE -a $DESTARCH -f $CONFIGLIST
+    echo generating ${initrdimg##*/} ...
+    cd $RFSDIR && sudo find . | sudo cpio --quiet -o -H newc | gzip > $PACKAGES_PATH/rfs/initrd/${initrdimg##*/} && \
+    cp -f $PACKAGES_PATH/rfs/initrd/${initrdimg##*/} $FBOUTDIR/images && \
+    ls -l $FBOUTDIR/images/${initrdimg##*/}
+    fbprint_d "$FBOUTDIR/images/${initrdimg##*/}"
+}
+
+generate_linux_itb() {
+    [ ! -f $kernel_img ] && echo building dependent $kernel_img && \
+    flex-builder -c linux -a ${DESTARCH}${endianstr} -p $SOCFAMILY -f $CONFIGLIST
+
+    [ $DISTROSCALE = tiny -a $DISTROTYPE = yocto -a ! -f $initrdimg -a "$BUILD_YOCTO_RFS" != y ] && \
+    flex-builder -c initrd -a $DESTARCH -f $CONFIGLIST
+
+    [ -f $initrdimg ] || flex-builder -i mkcpio -r ${DISTROTYPE}:${DISTROSCALE} -a ${DESTARCH}$endiantype -f $CONFIGLIST
+
+    tmpits=$FBDIR/configs/linux/linux_${DESTARCH}${endiantype}_${SOCFAMILY}_$DISTROSCALE.its
+    [ $DESTARCH = arm64 ] && cp -f $FBDIR/configs/linux/linux_arm64_LS_signature.its $tmpits && \
+    sed -i "s|../../build|${FBOUTDIR}|g" $tmpits && \
+    sed -i "s/rootfs_yocto_${DESTARCH}_tiny/rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH}/" $tmpits && \
+    mkimage -f $tmpits $FBOUTDIR/images/linux_LS_arm64_signature.itb && rm -f $tmpits
+
+    cp -f $FBDIR/configs/linux/linux_${DESTARCH}_${SOCFAMILY}.its $tmpits
+    sed -i "s|../../build|${FBOUTDIR}|g" $tmpits
+    sed -i "s/rootfs_yocto_${DESTARCH}_tiny/rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH}/" $tmpits && \
+    mkimage -f $tmpits $linux_itb && rm -f $tmpits && fbprint_d $linux_itb
+}
+
+generate_distro_bootscr() {
+    # $1: machine name
+    [ ! -f $FBDIR/configs/board/$1/manifest ] && echo $FBDIR/configs/board/$1/manifest not found && exit
+    if [ "$ENCAP" = "y" ] ; then
+	    [ -z $KEY_ID ] && KEY_ID=0x12345678123456781234567812345678
+	    if [ ${#KEY_ID} -gt 34 ]; then
+		echo "Key ID should be of 16 bytes" && exit
+	    else
+		[ ${KEY_ID:0:2} != 0x ] && echo "Improper format! Should start with 0x " && exit
+	    fi
+	    while [[ ${#KEY_ID} != 34 ]]; do
+		KEY_ID=${KEY_ID:0:2}0${KEY_ID:2}
+	    done
+	    echo $KEY_ID; key_id_1=${KEY_ID:2:8}; key_id_2=${KEY_ID:10:8}; key_id_3=${KEY_ID:18:8}; key_id_4=${KEY_ID:26:8}
+    fi
+
+    . $FBDIR/configs/board/$1/manifest
+    [ $1 = ls1088ardb_pb ] && mkdir -p $FBOUTDIR/firmware/u-boot/ls1088ardb || mkdir -p $FBOUTDIR/firmware/u-boot/$1
+
+    if [ -n "$distro_bootscript" ] ; then
+	if [ -n "$securevalidate" ]; then
+	    if [ "$ENCAP" = "y" ]; then
+		if [ $bootscript_dec != null ]; then
+		    echo $securevalidate_dec > $bootscript_dec.tmp
+		    echo $distroboot >> $bootscript_dec.tmp
+		    mkimage -A arm64 -O linux -T script -C none -a 0 -e 0  -n "boot.scr" \
+			    -d $bootscript_dec.tmp $bootscript_dec
+		    rm -f $bootscript_dec.tmp
+		fi
+		echo $securevalidate_enc > ${distro_bootscript}.tmp
+	    elif [ "$IMA_EVM" = "y" ]; then
+		if [ -n "$bootscript_enforce" ] ; then
+		    echo $securevalidate_enforce > $bootscript_enforce.tmp
+		    echo $distroboot_ima >> $bootscript_enforce.tmp
+		    mkimage -A arm64 -O linux -T script -C none -a 0 -e 0  -n "boot.scr" \
+			    -d $bootscript_enforce.tmp $bootscript_enforce
+		    rm -f $bootscript_enforce.tmp
+		fi
+		echo $securevalidate_fix > ${distro_bootscript}.tmp
+       	    else
+		echo $securevalidate > ${distro_bootscript}.tmp
+	    fi
+	fi
+	[ "$IMA_EVM" = "y" ] && echo $distroboot_ima >> ${distro_bootscript}.tmp || echo $distroboot >> ${distro_bootscript}.tmp
+	mkimage -A arm64 -O linux -T script -C none -a 0 -e 0  -n "boot.scr" -d ${distro_bootscript}.tmp $distro_bootscript
+	rm -f ${distro_bootscript}.tmp
+	fbprint_d $distro_bootscript
+    fi
+}
+
+generate_uefi_grub_cfg() {
+    for brd in $uefi_machine_list; do
+	[ ! -f $FBDIR/configs/board/$brd/manifest ] && echo $FBDIR/configs/board/$brd/manifest not found && continue
+	stra=`grep 'uefi_grub_search' $FBDIR/configs/board/$brd/manifest | cut -d'"' -f2`
+	strb=`grep 'uefi_grub_linux' $FBDIR/configs/board/$brd/manifest | cut -d'"' -f2`
+	mkdir -p $FBOUTDIR/firmware/uefi/$brd
+	filename=$FBOUTDIR/firmware/uefi/$brd/${brd}_grub.cfg
+	echo set default=\"1\" >  $filename
+	echo set timeout=10  >> $filename
+	echo "menuentry 'LSDK on QorIQ ARM64 $brd' {" >> $filename
+	echo "	""$stra" >> $filename
+	echo "	""$strb" >> $filename
+	echo "}" >> $filename
+    done
+}
+
+generate_bootpartition_tarball() {
+    # check kernel image
+    [ -f $KERNEL_PATH/Makefile ] || flex-builder -i repo-fetch -B linux -f $CONFIGLIST
+    curbrch=`cd $KERNEL_PATH && git branch | grep ^* | cut -d' ' -f2`
+    [ ! -f $kernel_img -o ! -f $KERNEL_OUTPUT_PATH/$curbrch/include/config/kernel.release ] && \
+    echo Building the dependent $kernel_img ... && generate_kernel_img
+
+    [ -f $tiny_itb ] || flex-builder -i mklinux -r yocto:tiny -a $DESTARCH -p $SOCFAMILY -f $CONFIGLIST
+
+    bootpartname=bootpartition_${SOCFAMILY}_${DESTARCH}
+    bootpartdir=$FBOUTDIR/images/$bootpartname
+    mkdir -p $bootpartdir
+
+    if [ $DESTARCH = ppc64 -o $DESTARCH = ppc32 ]; then
+	socseries=t
+    elif [ $DESTARCH = arm64 -o $DESTARCH = arm32 ]; then
+	[ $SOCFAMILY = IMX ] && socseries=im
+	[ $SOCFAMILY = LS  ] && socseries=l
+	[ -f $PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_yocto_${DISTROSCALE}_${DESTARCH}.cpio.gz ] && \
+	cp -f $PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_yocto_${DISTROSCALE}_${DESTARCH}.cpio.gz $bootpartdir
+    fi
+    fbprint_n "Installing kernel and dtb ..."
+    cp -f $tiny_itb $bootpartdir
+    kernelrelease=$(cat $KERNEL_OUTPUT_PATH/$curbrch/include/config/kernel.release)
+    [ $DESTARCH = arm64 ] && kernelimg=Image* || kernelimg=zImage*
+    cp -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/{*.dtb,$kernelimg,config-$kernelrelease} $bootpartdir
+    if [ $DESTARCH = arm64 ]; then
+	cp -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/vmlinuz-$kernelrelease $bootpartdir
+    elif [ $DESTARCH = arm32 ]; then
+	cp -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/uImage* $bootpartdir
+    fi
+
+    # install kernel modules
+    fbprint_n "Installing kernel modules ..."
+    cp -rf $KERNEL_OUTPUT_PATH/$curbrch/tmp/lib/modules $bootpartdir
+    modversion=$(ls $KERNEL_OUTPUT_PATH/$curbrch/tmp/lib/modules)
+    rm -f $bootpartdir/modules/$modversion/{build,source}
+    ln -sf /usr/src/linux-headers-$modversion $bootpartdir/modules/$modversion/build
+    ln -sf /usr/src/linux  $bootpartdir/modules/$modversion/source
+
+    # install distro boot script
+    fbprint_n "Installing distro boot script ..."
+    if [ $DESTARCH = arm64 -a $SOCFAMILY = LS ]; then
+	socseries=l; scrmask="-v -E ls1021atwr"
+    elif [ $DESTARCH = arm32 -a $SOCFAMILY = LS ]; then
+	socseries=l; scrmask="-E ls1021atwr"
+    elif [ $DESTARCH = arm64 -a $SOCFAMILY = IMX ]; then
+	socseries=imx*; scrmask="-E imx8"
+    elif [ $DESTARCH = arm32 -a $SOCFAMILY = IMX ]; then
+	socseries=imx*; scrmask="-v -E imx8"
+    fi
+    if ! `ls $FBOUTDIR/firmware/u-boot/$socseries*/*boot.scr 1>/dev/null 2>&1`; then
+	flex-builder -i mkdistroscr -p $SOCFAMILY -f $CONFIGLIST
+    fi
+    ls $FBOUTDIR/firmware/u-boot/$socseries*/*boot.scr | grep $scrmask | xargs -I {} cp -v {} $bootpartdir
+
+    # check UEFI
+    if [ "$CONFIG_FW_UEFI_BIN" = y -a $SOCFAMILY = LS -a $DESTARCH = arm64 ]; then
+	generate_uefi_grub_cfg
+	mkdir -p $bootpartdir/grub
+	find  $FBOUTDIR/firmware/uefi/ -name "*grub.cfg" | xargs -I {} cp {} $bootpartdir/grub
+	[ -f $FBOUTDIR/firmware/uefi/grub/BOOTAA64.EFI ] || flex-builder -c uefi_bin -f $CONFIGLIST
+	cp $FBOUTDIR/firmware/uefi/grub/BOOTAA64.EFI $bootpartdir/grub
+    fi
+
+    # secure boot headers
+    if [ $SOCFAMILY = LS ]; then
+	[ -z "$BOOTTYPE" ] && boottype=all || boottype=$BOOTTYPE
+	flex-builder -i signimg -m $MACHINE -b $boottype -a $DESTARCH -f $CONFIGLIST
+	cp -rf $FBOUTDIR/firmware/secboot_hdrs $bootpartdir
+	ls $FBOUTDIR/firmware/secboot_hdrs/*/*bs.out | grep $scrmask | xargs -I {} cp {} $bootpartdir
+    fi
+
+    # check IMA/EVM
+    if [ "$IMA_EVM" = y -a $SOCFAMILY = LS ]; then
+	[ -f $FBOUTDIR/images/initramfs_imaevm_${DESTARCH}.img ] || \
+	flex-builder -i mkrfs -r buildroot:imaevm -a $DESTARCH -f $CONFIGLIST
+
+	cp -f $FBOUTDIR/images/initramfs_imaevm_${DESTARCH}.img $bootpartdir/initramfs.img
+	for brd in $LS_MACHINE_LIST; do
+	    [ -f $FBOUTDIR/firmware/u-boot/$brd/${brd}_enforce_boot.scr ] && \
+	    cp -f $FBOUTDIR/firmware/u-boot/$brd/${brd}_enforce_boot.scr $bootpartdir
+	done
+    fi
+
+    # install flash images to bootpartition if INSTALL_FLASH_IMAGES=y is enabled
+    if [ "$INSTALL_FLASH_IMAGES" = y -a $SOCFAMILY = LS ]; then
+	if [ $DESTARCH = arm64 -a $MACHINE = all ]; then
+	    brdlist="`echo $LS_MACHINE_LIST | sed s/ls1021atwr//`"
+	elif [ $DESTARCH = arm32 -a $MACHINE = all ]; then
+	    brdlist="ls1021atwr"
+	elif [ $DESTARCH = ppc64 -a $MACHINE = all ]; then
+	     brdlist="t1024rdb t2080rdb t4240rdb"
+	elif [ $MACHINE != all ]; then
+	    brdlist=$MACHINE
+	fi
+
+	for brd in $brdlist; do
+	    if ! echo $LS_MACHINE_LIST | grep -q $brd; then continue; fi
+	    mkdir -p $bootpartdir/flash_images/$brd
+	    [ -f $FBOUTDIR/images/firmware_${brd}_uboot_qspiboot.img ] && \
+	    cp -f $FBOUTDIR/images/firmware_${brd}_uboot_qspiboot.img $bootpartdir
+
+	    [ -f $FBOUTDIR/images/firmware_${brd}_uboot_xspiboot.img ] && \
+	    cp -f $FBOUTDIR/images/firmware_${brd}_uboot_xspiboot.img $bootpartdir
+
+	    [ -f $FBOUTDIR/images/firmware_${brd}_uboot_norboot.img ] && \
+	    cp -f $FBOUTDIR/images/firmware_${brd}_uboot_norboot.img $bootpartdir
+
+	    [ "$CONFIG_FW_UEFI" = y -a -f $FBOUTDIR/images/firmware_ls2088ardb_uefi_norboot.img ] && \
+	    cp -f $FBOUTDIR/images/firmware_ls2088ardb_uefi_norboot.img $bootpartdir
+
+	    [ "$CONFIG_FW_UEFI" = y -a -f $FBOUTDIR/images/firmware_lx2160ardb_uefi_xspiboot.img ] && \
+	    cp -f $FBOUTDIR/images/firmware_lx2160ardb*_uefi_xspiboot.img $bootpartdir
+
+	    # atf
+	    [ ${brd:0:7} != ls1021a ] && \
+	    if [ "$SECURE" != y ] && [ ! -f $FBOUTDIR/firmware/atf/$brd/fip_uboot.bin ]; then
+		flex-builder -c atf -m $brd -f $CONFIGLIST
+	    elif [ "$SECURE" = y ] && [ ! -f $FBOUTDIR/firmware/atf/$brd/fip_uboot_sec.bin ]; then
+		flex-builder -c atf -m $brd -s -f $CONFIGLIST
+	    fi && \
+	    [ -f $FBOUTDIR/firmware/atf/$brd/fip_uboot.bin ] && \
+	    cp -f $FBOUTDIR/firmware/atf/$brd/* $bootpartdir/flash_images/$brd && \
+	    [ $brd = ls1088ardb -a -f $FBOUTDIR/firmware/atf/ls1088ardb_pb/fip_uboot.bin ] && \
+	    cp -f $FBOUTDIR/firmware/atf/ls1088ardb_pb/* $bootpartdir/flash_images/$brd
+
+	    # ddr phy
+	    [ -f $FBOUTDIR/firmware/ddr_phy_bin/fip_ddr_all.bin -a ${brd:0:5} = lx216 ] && \
+	    cp -f $FBOUTDIR/firmware/ddr_phy_bin/fip_ddr_all.bin $bootpartdir/flash_images/$brd
+
+	    # fman ucode
+	    [ -f $FBOUTDIR/firmware/fm_ucode/fsl_fman_ucode_ls1046_r1.0_106_4_18.bin ] || \
+	    flex-builder -c fm_ucode -f $CONFIGLIST
+	    cp -f $FBOUTDIR/firmware/fm_ucode/*ls104* $bootpartdir/flash_images
+
+	    # qe firmware
+	    [ -f $FBOUTDIR/firmware/qe_ucode/iram_Type_A_LS1021a_r1.0.bin ] || \
+	    flex-builder -c qe_ucode -f $CONFIGLIST
+	    cp -f $FBOUTDIR/firmware/qe_ucode/iram_Type*.bin $bootpartdir/flash_images
+
+	    # dp firmware
+	    if [ ${brd:0:7} = ls1028a ]; then
+		[ -f $FBOUTDIR/firmware/dp_firmware_cadence/dp/ls1028a-dp-fw.bin ] || \
+		flex-builder -c dp_firmware_cadence -f $CONFIGLIST
+		cp -f $FBOUTDIR/firmware/dp_firmware_cadence/dp/ls1028a-dp-fw.bin $bootpartdir/flash_images
+	    fi
+
+	    # pfe
+	    if [ ${brd:0:7} = ls1012a ]; then
+		[ -f $FBOUTDIR/firmware/pfe_bin/ls1012a/u-boot/pfe_fw_sbl.itb ] || \
+		flex-builder -c pfe_bin -f $CONFIGLIST
+		cp -f $FBOUTDIR/firmware/pfe_bin/ls1012a/u-boot/pfe_fw_sbl.itb $bootpartdir/flash_images
+	    fi
+
+	    # DPAA2-MC
+	    if [ ${brd:0:7} = ls1088a -o ${brd:0:7} = ls2088a -o ${brd:0:5} = lx216 ]; then
+		[ -d $FBOUTDIR/firmware/mc_utils/config ] || \
+		flex-builder -c bin_firmware -f $CONFIGLIST
+		[ $brd = lx2160ardb_rev2 ] && socname=${brd::-8} || socname=${brd::-3}
+		[ $brd = ls1088ardb_pb ] && socname=${brd::-6}
+		[ ${brd:0:5} = lx216 ] && tmpdir=lx216xa || tmpdir=$socname
+		cp -f $FBOUTDIR/firmware/mc_bin/$tmpdir/mc*.itb $bootpartdir/flash_images/$brd
+		[ $brd = lx2162aqds ] && tmpdir=$brd || tmpdir=$socname/RDB
+		find $FBOUTDIR/firmware/mc_utils/config/$tmpdir -name *.dtb | \
+		xargs -I {} cp {} $bootpartdir/flash_images/$brd
+	    fi
+
+	    # phy_cortina
+	    [ -f $FBOUTDIR/firmware/phy_cortina/cs4315-cs4340-PHY-ucode.txt ] || \
+	    flex-builder -c phy_cortina -f $CONFIGLIST
+	    cp -f $FBOUTDIR/firmware/phy_cortina/*PHY-ucode* $bootpartdir/flash_images
+
+	    # phy_inphi
+	    [ -f $FBOUTDIR/firmware/phy_inphi/in112525-phy-ucode.txt ] && \
+	    cp -f $FBOUTDIR/firmware/phy_inphi/in112525-phy-ucode.txt $bootpartdir/flash_images
+	done
+	[ -f $FBOUTDIR/images/flash_images.scr ] || flex-builder -i mkflashscr -f $CONFIGLIST
+	cp -f $FBOUTDIR/images/flash_images.scr $bootpartdir
+    fi
+
+    # install kernel tools/perf
+    [ $DESTARCH = arm64 -a ! -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/perf ] && \
+    flex-builder -c perf -f $CONFIGLIST
+    [ -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/perf ] && mkdir -p $bootpartdir/tools && \
+    cp -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/perf $bootpartdir/tools
+
+    majorver=`grep "^VERSION =" $KERNEL_PATH/Makefile | cut -d' ' -f3`
+    subver=`grep "^PATCHLEVEL =" $KERNEL_PATH/Makefile | cut -d' ' -f3`
+    kernelver=$majorver.$subver
+    [ -f $FBOUTDIR/images/srk_hash.txt -a $SOCFAMILY = LS ] && cp $FBOUTDIR/images/srk_hash.txt $bootpartdir
+    boottarball=${bootpartname}_lts_${kernelver}${imaevmopt}_`date +%Y%m%d%H%M`
+    echo $boottarball > $bootpartdir/buildinfo
+    cd $bootpartdir && tar czf ../$boottarball.tgz *
+    cd $FBOUTDIR/images && rm -rf ${bootpartname}_lts_${kernelver}${imaevmopt}
+    mv $bootpartname ${bootpartname}_lts_${kernelver}${imaevmopt}
+    ln -sf $boottarball.tgz ${bootpartname}_lts_${kernelver}${imaevmopt}.tgz
+
+    fbprint_d $FBOUTDIR/images/$boottarball.tgz
+}
+
+build_distro_rfs_ubuntu() {
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ] && [ -f $RFSDIR/etc/buildinfo ]; then
+	echo $RFSDIR already exists! && exit 0
+    elif [ $DISTROSCALE = mate -a $DESTARCH != arm64 ]; then
+	echo only arm64 is supported for mate && exit
+    fi
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ] && [ ! -f $RFSDIR/etc/buildinfo ]; then
+	echo generating $RFSDIR ...
+	test -c $RFSDIR/dev/pts/ptmx && sudo umount $RFSDIR/dev/pts
+	test -f $RFSDIR/proc/uptime && sudo umount $RFSDIR/proc
+	[ -n "$RFSDIR" ] && sudo rm -rf $RFSDIR/*
+    fi
+    [ -n "$BUILDARG" ] && pkglist=$BUILDARG || pkglist=additional_packages_list
+    mkdir -p $RFSDIR
+
+    if [ "$FETCH_PREBUILT_LSDK_RFS" = y ] && [ $DISTROTYPE = ubuntu -a $DISTROSCALE = main ]; then
+       rootfsn=rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH}.tgz
+       rootfs_url=$DISTRO_SVR_URL/$DISTRIB_VERSION/$rootfsn
+       echo Option FETCH_PREBUILT_LSDK_RFS is enabled in configs/$CONFIGLIST
+       if [ ! -f $FBOUTDIR/images/$rootfsn ]; then
+           fbprint_n "Downloading $rootfs_url ..." && cd $FBOUTDIR/images
+           wget --progress=bar:force $rootfs_url || true
+       fi
+       [ -f $FBOUTDIR/images/$rootfsn ] && echo Extracting $rootfsn && \
+       sudo tar xf $FBOUTDIR/images/$rootfsn -C $RFSDIR || echo Building $RFSDIR from scratch
+       cd $FBDIR
+    fi
+
+    if [ $DISTROSCALE = lite -a $DISTROTYPE = ubuntu ]; then
+	. $FBDIR/configs/ubuntu/build.cfg
+	rfsname=`eval echo '${'"ubuntu_base_""$DESTARCH"'}'`
+	if [ -f $FBOUTDIR/rfs/$rfsname ]; then
+	    echo $FBOUTDIR/rfs/$rfsname exist already
+	else
+	    wget --progress=bar:force $ubuntu_base_url/$rfsname -O $FBOUTDIR/rfs/$rfsname
+	    [ $? != 0 ] && fbprint_e "Failed to download $ubuntu_base_url/$rfsname" && exit
+	fi
+	if [ -f $FBOUTDIR/rfs/$rfsname ]; then
+	    md5sum_expected=`eval echo '${'"md5sum_""$DESTARCH"'}'`
+	    md5sum_current=`md5sum $FBOUTDIR/rfs/$rfsname | cut -d' ' -f1`
+	    if [ $md5sum_expected = $md5sum_current ]; then
+		echo Extracting $rfsname ...
+		sudo tar xf $FBOUTDIR/rfs/$rfsname -C $RFSDIR
+	    else
+		fbprint_e "md5sum of downloaded image is unmatched $md5sum_current != $md5sum_expected"
+		rm -f $FBOUTDIR/rfs/$rfsname && exit
+	    fi
+	fi
+	flex-mkdistrorfs $SYSARCH $CODENAME $DISTROSCALE $pkglist && \
+	flex-builder -i merge-component -r ubuntu:lite -a $DESTARCH -f $CONFIGLIST && \
+	flex-builder -i mkcpio -r ubuntu:lite -a $DESTARCH -f $CONFIGLIST && \
+	flex-builder -i packrfs -r ubuntu:lite -a $DESTARCH -f $CONFIGLIST
+    elif [ $DISTROSCALE = mate -a $DISTROTYPE = ubuntu ]; then
+	. $FBDIR/configs/ubuntu/build.cfg
+        rfsname=ubuntu_mate_${DESTARCH}.img
+	[ $DESTARCH = arm32 ] && rootfs_url=$ubuntu_mate_arm32_url || rootfs_url=$ubuntu_mate_arm64_url
+	if [ ! -f $FBOUTDIR/rfs/$rfsname.xz ]; then
+	    wget --progress=bar:force $rootfs_url -O $FBOUTDIR/rfs/$rfsname.xz
+	    [ $? != 0 ] && fbprint_e "Failed to download $rootfs_url" && exit
+	fi
+	if [ ! -f $FBOUTDIR/rfs/$rfsname ]; then
+	    sha256sum_expected=`eval echo '${'"sha256sum_""$DESTARCH"'}'`
+	    sha256sum_current=`sha256sum $FBOUTDIR/rfs/$rfsname.xz | cut -d' ' -f1`
+	    if [ $sha256sum_expected = $sha256sum_current ]; then
+		echo Extracting $rfsname.xz ... && unxz -k $FBOUTDIR/rfs/$rfsname.xz
+	    else
+		fbprint_e "sha256sum of downloaded image is unmatched $sha256sum_current != $sha256sum_expected"
+		rm -rf $FBOUTDIR/rfs/${rfsname}* && exit
+	    fi
+	fi
+	mkdir -p $FBOUTDIR/rfs/ubuntu_mate_mnt
+	sudo mount -o loop,offset=268435456 $FBOUTDIR/rfs/$rfsname $FBOUTDIR/rfs/ubuntu_mate_mnt
+	sudo cp -raf $FBOUTDIR/rfs/ubuntu_mate_mnt/* $RFSDIR && sudo umount $FBOUTDIR/rfs/ubuntu_mate_mnt && rm -rf $FBOUTDIR/rfs/ubuntu_mate_mnt
+	sudo cp -f $RFSDIR/home/oem/.profile $RFSDIR/root/.profile
+	sudo rm -f $RFSDIR/usr/lib/systemd/system/rpi-eeprom-update.service
+	sudo ln -sf /lib/systemd/system/graphical.target $RFSDIR/etc/systemd/system/default.target
+	sudo mkdir -p $RFSDIR/etc/systemd/system/local-fs.target.wants
+	sudo ln -sf /etc/systemd/system/boot.mount $RFSDIR/etc/systemd/system/local-fs.target.wants/boot.mount
+	sudo cp -f $FBDIR/packages/rfs/misc/boot.mount $RFSDIR/etc/systemd/system
+	sudo cp -f $FBDIR/tools/flex-installer $RFSDIR/usr/bin
+	echo -e "greeter-show-manual-login=true\nall-guest=false" | sudo tee -a $RFSDIR/usr/share/lightdm/lightdm.conf.d/50-slick-greeter.conf
+	echo "" | sudo tee $RFSDIR/etc/fstab
+	echo "$DISTRIB_NAME Mate ${DISTRIB_VERSION:4:4} (based on Ubuntu-Mate) \n \l" | sudo tee $RFSDIR/etc/issue 1>/dev/null
+	distrostamp="Build: `date +'%Y-%m-%d %H:%M:%S'`"
+	echo "$DISTRIB_NAME Mate ${DISTRIB_VERSION:4:4} (based on Ubuntu-Mate)" | sudo tee $RFSDIR/etc/buildinfo 1>/dev/null
+	echo "$distrostamp" | sudo tee -a $RFSDIR/etc/buildinfo 1>/dev/null
+	sudo sed -i 's/root:\*/root:/g' $RFSDIR/etc/shadow && sudo rm -f $RFSDIR/etc/modules-load.d/cups-filters.conf
+	sudo rm -f $RFSDIR/lib/systemd/system/oem-config.service; sudo rm -f $RFSDIR/lib/systemd/system/grub-initrd-fallback.service
+	sudo rm -f $RFSDIR/lib/systemd/system/oem-config.target; sudo rm -f $RFSDIR/lib/modprobe.d/fbdev-blacklist.conf
+	sudo rm -f $RFSDIR/etc/initramfs/post-update.d/flash-kernel; sudo rm -rf $RFSDIR/boot/*
+	sudo rm -rf $RFSDIR/lib/modules; sudo ln -sf /boot/modules $RFSDIR/lib/modules
+	sudo cp -f /usr/bin/qemu-aarch64-static $RFSDIR/usr/bin
+	sudo rm -f $RFSDIR/etc/resolv.conf; sudo cp -f /etc/resolv.conf $RFSDIR/etc
+	# install extra apt packages
+	check_proxy $RFSDIR && sudo chroot $RFSDIR apt update && sudo chroot $RFSDIR apt install -y $additional_mate_packages_list
+	if ! grep -q mali-dp $RFSDIR/etc/modules; then echo mali-dp | sudo tee -a $RFSDIR/etc/modules 1>/dev/null; fi
+        cd $RFSDIR/usr/lib/aarch64-linux-gnu && sudo ln -sf libxml2.so.2 libxml2.so && sudo ln -sf libpam.so.0 libpam.so && \
+	sudo ln -sf libz.so.1 libz.so && sudo ln -sf libcrypto.so.1.1 libcrypto.so && sudo ln -sf libtinfo.so.6 libtinfo.so && cd $FBDIR
+    elif [ ! -f $RFSDIR/etc/buildinfo ]; then
+	flex-mkdistrorfs $SYSARCH $CODENAME $DISTROSCALE $pkglist
+    fi
+
+    if [ -d $RFSDIR/etc/udev/rules.d ]; then
+	sudo cp -f $FBDIR/packages/rfs/misc/udev/udev-rules-qoriq/72-fsl-dpaa-persistent-networking.rules $RFSDIR/etc/udev/rules.d
+	sudo cp -f $FBDIR/packages/rfs/misc/udev/udev-rules-qoriq/73-fsl-enetc-networking.rules $RFSDIR/etc/udev/rules.d
+    fi
+    fbprint_d $RFSDIR
+}
+
+build_distro_rfs_centos() {
+    [ $DESTARCH != arm64 -a $DESTARCH != ppc64 ] && echo The supported CentOS arch: arm64, ppc64 && exit 1
+    [ -f $RFSDIR/etc/buildinfo ] && echo $RFSDIR already exists! && exit 0
+    if [ -d $RFSDIR -a ! -f $RFSDIR/etc/buildinfo ]; then
+	[ -n "$RFSDIR" ] && sudo rm -rf $RFSDIR/*
+    fi
+    echo "building $RFSDIR ..."
+    centos_url=`eval echo '${'"centos_""$DESTARCH"'_url}'`
+    if [ ! -s $FBOUTDIR/rfs/centos_${DESTARCH}_squashfs.img ]; then
+	wget --progress=bar:force $centos_url -O $FBOUTDIR/rfs/centos_${DESTARCH}_squashfs.img
+	[ $? != 0 -o ! -s $FBOUTDIR/rfs/centos_${DESTARCH}_squashfs.img ] && \
+	fbprint_e "Failed to download $centos_url" && exit
+    fi
+    echo Extracting CentOS squashfs.img ...
+    mkdir -p $FBOUTDIR/rfs/{centosmnt,centosmnt2}
+    sudo mount -o loop $FBOUTDIR/rfs/centos_${DESTARCH}_squashfs.img $FBOUTDIR/rfs/centosmnt && \
+    sudo mount -o loop $FBOUTDIR/rfs/centosmnt/LiveOS/rootfs.img $FBOUTDIR/rfs/centosmnt2 && \
+    sudo cp -Prf --preserve=mode,timestamps $FBOUTDIR/rfs/centosmnt2/* $RFSDIR/ && \
+    sudo umount $FBOUTDIR/rfs/centosmnt2 && sudo umount $FBOUTDIR/rfs/centosmnt
+    if [ $? = 0 ]; then
+	distrots=${DISTROTYPE}_${centos_version}_${DESTARCH}_`date +%Y%m%d%H%M`
+	echo $distrots | sudo tee $RFSDIR/etc/buildinfo
+	rm -rf $FBOUTDIR/rfs/{centosmnt,centosmnt2}
+    else
+	echo Failded to build $RFSDIR && exit 1
+    fi
+
+    if [ -d $RFSDIR/etc/udev/rules.d ]; then
+	sudo cp -f $FBDIR/packages/rfs/misc/udev/udev-rules-qoriq/72-fsl-dpaa-persistent-networking.rules $RFSDIR/etc/udev/rules.d
+    fi
+    sudo cp -f $FBDIR/packages/rfs/misc/boot.mount $RFSDIR/etc/systemd/system/
+    sudo rm -f $RFSDIR/etc/systemd/system/default.target
+    sudo ln -sf $RFSDIR/usr/lib/systemd/system/multi-uset.target $RFSDIR/etc/systemd/system/default.target
+    sudo rm -rf $RFSDIR/lib/modules && sudo rm -rf $RFSDIR/boot/*
+    sudo ln -sf /boot/modules $RFSDIR/lib/modules
+    if [ $DESTARCH = arm64 ]; then
+	# reinstall yum
+	cd $RFSDIR && yum_url=`eval echo '${'"yum_""$DESTARCH"'_url}'`
+	wget --progress=bar:force $yum_url -O $RFSDIR/yum.rpm
+	sudo rpm2cpio $RFSDIR/yum.rpm | sudo cpio -divu && rm -f $RFSDIR/yum.rpm
+    fi
+    sudo mkdir -p $RFSDIR/etc/yum.repos.d
+    sudo cp -f $FBDIR/configs/centos/CentOS-Base.repo $RFSDIR/etc/yum.repos.d
+    sudo ln -sf ../boot.mount $RFSDIR/etc/systemd/system/local-fs.target.wants/boot.mount
+    fbprint_d $RFSDIR
+}
+
+build_distro_rfs_buildroot() {
+    if [ ! -d $PACKAGES_PATH/rfs/buildroot ]; then
+	git clone $buildroot_repo_url $PACKAGES_PATH/rfs/buildroot && \
+	cd $PACKAGES_PATH/rfs/buildroot && git checkout $buildroot_repo_tag -b $buildroot_repo_tag && cd -
+    fi
+    if [ ! -f $PACKAGES_PATH/rfs/buildroot/.patched ]; then
+	cd $PACKAGES_PATH/rfs/buildroot && echo patching buildroot repo ... && \
+	git am $FBDIR/configs/buildroot/patch/*.patch && touch .patched && cd -
+    fi
+    sed -i '/have legacy configuration.*/d' $PACKAGES_PATH/rfs/buildroot/Makefile.legacy
+    if [ "$1" = toolchain ]; then
+	mkdir -p ${RFSDIR%/*}
+	cp -f $FBDIR/configs/buildroot/qoriq_${2}_tiny_defconfig $PACKAGES_PATH/rfs/buildroot/configs
+	make -j $JOBS qoriq_${2}_tiny_defconfig O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot
+	make -j $JOBS toolchain O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot KERNEL_TREE=$KERNEL_TREE
+	return
+    fi
+    if [ $DISTROSCALE = tiny -a ! -f ${RFSDIR%/*}/.customdone ]; then
+	brconfig=qoriq_${DESTARCH}${endiantype}_tiny_defconfig
+	cp $FBDIR/configs/buildroot/$brconfig $PACKAGES_PATH/rfs/buildroot/configs
+	make -j $JOBS O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot $brconfig
+    elif [ $DISTROSCALE = imaevm -a ! -f ${RFSDIR%/*}/.customdone ]; then
+	[ "$ENDIANTYPE" = be ] && echo currently $DESTARCH big-endian is not supported with initramfs IMA/EVM! && exit 1 || \
+	brconfig=qoriq_${DESTARCH}_imaevm_defconfig
+	mkdir -p ${RFSDIR%/*}/overlay/{mnt/root,sys,proc/sys/kernel,root}
+	cp -f $FBDIR/configs/buildroot/sec_imaevm.sh ${RFSDIR%/*}/overlay/init
+	cp $FBDIR/configs/buildroot/$brconfig $PACKAGES_PATH/rfs/buildroot/configs
+	make -j $JOBS O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot $brconfig
+    elif [ $DISTROSCALE = devel -a ! -f ${RFSDIR%/*}/.customdone ]; then
+	brconfig=qoriq_${DESTARCH}${endiantype}_devel_defconfig
+	cp $FBDIR/configs/buildroot/$brconfig $PACKAGES_PATH/rfs/buildroot/configs
+	make -j $JOBS O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot $brconfig
+    fi
+    if [ "$DISTROSCALEOPT" = custom ]; then
+	make -j $JOBS O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot menuconfig
+	fbprint_d "customized ${RFSDIR%/*}/.config"
+	touch ${RFSDIR%/*}/.customdone
+	echo then run flex-builder -i mkrfs -r buildroot:$DISTROSCALE -a $DESTARCH to build target distro with the custom .config above.
+	exit
+    fi
+    [ -d $RFSDIR/usr/local/aiop/bin ] && rm -rf $RFSDIR/usr/local/aiop/bin
+    make -j $JOBS O=${RFSDIR%/*} -C $PACKAGES_PATH/rfs/buildroot KERNEL_TREE=$KERNEL_TREE
+    [ $DISTROSCALE = devel ] && mkdir -p $RFSDIR/etc/systemd/system && \
+    cp -f $PACKAGES_PATH/rfs/misc/boot.mount $RFSDIR/etc/systemd/system/
+    if [ $DISTROSCALE = imaevm ]; then
+	mkimage -A arm -O linux -T ramdisk -n "initramfs imaevm" -d ${RFSDIR%/*}/images/rootfs.cpio.gz \
+		${RFSDIR%/*}/images/initramfs_imaevm_${DESTARCH}.img
+	cp -f ${RFSDIR%/*}/images/initramfs_imaevm_${DESTARCH}.img $PACKAGES_PATH/rfs/initrd/
+	cp -f ${RFSDIR%/*}/images/initramfs_imaevm_${DESTARCH}.img $FBOUTDIR/images
+	cp -f ${RFSDIR%/*}/images/rootfs.cpio.gz \
+	$PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_buildroot_${DISTROSCALE}_${DESTARCH}${endiantype}.cpio.gz
+	fbprint_d ${RFSDIR%/*}/images/initramfs_imaevm_${DESTARCH}.img && exit 0
+    fi
+    ls -l $FBOUTDIR/images/rootfs_${DISTRIB_VERSION}_buildroot*
+    rm -f $RFSDIR/THIS_IS_NOT_YOUR_ROOT_FILESYSTEM
+    flex-builder -i packrfs -r buildroot:$DISTROSCALE -a ${DESTARCH}$endianstr -f $CONFIGLIST
+}
+
+build_distro_rfs_yocto() {
+    [ $username = root ] && fbprint_w "Please build yocto as non-root account" && exit
+    [ -f $PACKAGES_PATH/rfs/yocto-poky/meta-poky/recipes-core/tiny-init/files/init ] || \
+    git clone $yocto_poky_repo_url $PACKAGES_PATH/rfs/yocto-poky -b $yocto_poky_repo_tag
+
+    yoctorfs=rootfs_${DISTRIB_VERSION}_yocto_${DISTROSCALE}_${DESTARCH}
+    . $PACKAGES_PATH/rfs/yocto-poky/oe-init-build-env $FBOUTDIR/rfs/$yoctorfs
+    $FBDIR/configs/yocto/reconfig.sh fixcfg
+    cp -f $FBDIR/configs/yocto/local_${DESTARCH}_${DISTROSCALE}.conf $FBOUTDIR/rfs/$yoctorfs/conf/local.conf
+    export LANG=en_US.UTF-8
+    [ $DESTARCH = arm64 ] && export MACHINE=qemuarm64 || export MACHINE=qemuarm
+    [ $DESTARCH = ppc32 ] && export MACHINE=qemuppc
+    [ $DESTARCH = ppc64 ] && export MACHINE=qemuppc64
+    bitbake $yoctoimgtype
+    [ $DESTARCH = arm64 -a $DISTROSCALE = devel ] && $FBDIR/configs/yocto/reconfig.sh fixlib $RFSDIR/usr/lib/libc.so
+    [ -L $FBOUTDIR/rfs/$yoctorfs/target ] || ln -s $RFSDIR $FBOUTDIR/rfs/$yoctorfs/target
+
+    # setup app components (restool, aiop_tool, tsntool, fmc, etc) in yocto userland
+    echo Building and installing app components for $DISTROTYPE $DISTROSCALE
+    flex-builder -c apps -r yocto:$DISTROSCALE -a ${DESTARCH} -f $CONFIGLIST
+    if [ $DISTROSCALE = tiny ]; then
+	[ -f $DESTDIR/usr/local/bin/restool ] && sudo cp -f $DESTDIR/usr/local/bin/{ls-*,restool} $RFSDIR/usr/bin
+	[ -f $DESTDIR/usr/bin/aiop_tool ] && sudo cp -f $DESTDIR/usr/bin/aiop_tool $RFSDIR/usr/bin
+	[ -f $DESTDIR/lib/libfm-arm.a ] && sudo cp -f $DESTDIR/lib/libfm-arm.a $RFSDIR/lib
+	[ -f $DESTDIR/usr/local/bin/fmc ] && sudo cp -f $DESTDIR/usr/local/bin/fmc $RFSDIR/usr/bin && \
+	sudo cp -Prf --preserve=mode,timestamps $DESTDIR/etc/fmc $RFSDIR/etc && sudo cp -f $DESTDIR/usr/local/lib/*/libfmc.a $RFSDIR/usr/local/lib
+	[ -f $DESTDIR/usr/local/bin/tsntool ] && sudo cp -f $DESTDIR/usr/local/bin/tsntool $RFSDIR/usr/bin && \
+	sudo cp -f $DESTDIR/usr/lib/libtsn.so $RFSDIR/usr/lib
+	sudo mkdir -p $RFSDIR/usr/local/bin && [ -f $DESTDIR/usr/local/bin/ccsr ] && sudo cp -f $DESTDIR/usr/local/bin/ccsr $RFSDIR/usr/local/bin/
+	sudo rm -rf $RFSDIR/usr/include/* $RFSDIR/usr/lib/aarch64-poky-linux $RFSDIR/usr/share/libtool $RFSDIR/usr/share/aclocal
+	sudo echo TinyLinux | sudo tee $RFSDIR/etc/hostname 1>/dev/null
+	sudo cp -f $FBDIR/packages/rfs/misc/mount-modules $RFSDIR/usr/local/bin
+    elif [ $DISTROSCALE = devel ]; then
+	sudo cp -Prf --preserve=mode,timestamps $DESTDIR/* $RFSDIR/
+	sudo mkdir -p $RFSDIR/etc/systemd/system && sudo cp -f $PACKAGES_PATH/rfs/misc/boot.mount $RFSDIR/etc/systemd/system/
+	sudo echo DevelLinux | sudo tee $RFSDIR/etc/hostname 1>/dev/null
+    fi
+    distroinfo="$DISTRIB_NAME $DISTROSCALE ${DISTRIB_VERSION:4:4} (based on Yocto)"
+    echo $distroinfo | sudo tee $RFSDIR/etc/issue 1>/dev/null
+    echo $distroinfo | sudo tee $RFSDIR/etc/buildinfo 1>/dev/null
+    distrostamp="Build: `date +'%Y-%m-%d %H:%M:%S'`"
+    echo "$distrostamp" | sudo tee -a $RFSDIR/etc/buildinfo 1>/dev/null
+    sudo cp -f $FBDIR/tools/flex-installer $RFSDIR/usr/bin
+    $FBDIR/configs/yocto/reconfig.sh fixsys $RFSDIR
+    cd $RFSDIR && sudo chown -h -R 0:0 * && \
+    sudo find . | sudo cpio --quiet -o -H newc | gzip > $PACKAGES_PATH/rfs/initrd/$yoctorfs.cpio.gz && \
+    cp $PACKAGES_PATH/rfs/initrd/$yoctorfs.cpio.gz $FBOUTDIR/images && \
+    cd $FBDIR && fbprint_d $FBOUTDIR/images/$yoctorfs.cpio.gz
+
+    cp -f $yoctotmpdir/deploy/images/$MACHINE/${yoctoimgtype}-${MACHINE}.manifest $FBOUTDIR/rfs/$yoctorfs/$yoctorfs.packages.manifest
+    [ $DISTROSCALE = tiny ] && cp -f $yoctotmpdir/deploy/images/$MACHINE/${yoctoimgtype}-${MACHINE}.ubifs $FBOUTDIR/images/$yoctorfs.ubifs && \
+    cp -f $yoctotmpdir/deploy/images/$MACHINE/${yoctoimgtype}-${MACHINE}.squashfs $FBOUTDIR/images/$yoctorfs.squashfs
+
+    flex-builder -i packrfs -r yocto:$DISTROSCALE -a $DESTARCH -f $CONFIGLIST
+    ls -goh $FBOUTDIR/images/$yoctorfs*
+}
+
+build_distro_rfs_android() {
+    if [ $PORTFOLIO != layerscape -a $PORTFOLIO != imx6 -a $PORTFOLIO != imx7 -a $PORTFOLIO != imx8 ]; then
+	fbprint_e "invalid $PORTFOLIO, valid -p argument: layerscape, imx6, imx7, imx8" && exit 1
+    fi
+    . $FBDIR/configs/android/build_$PORTFOLIO.cfg
+    mkdir -p $PACKAGES_PATH/rfs/android_$PORTFOLIO
+    if [ ! -f $PACKAGES_PATH/rfs/android_$PORTFOLIO/.repo/manifest.xml ]; then
+	echo Downloading Android source to $PACKAGES_PATH/rfs/android_$PORTFOLIO ...
+	cd $PACKAGES_PATH/rfs/android_$PORTFOLIO
+	[ -f /usr/bin/repo ] || sudo apt install -y repo
+	repo init -u $android_manifest_url -b $android_manifest_branch -m $android_manifest_version.xml
+	[ $? != 0 ] && fbprint_e "Android repo Init failed" && return 1
+    fi
+
+    if [ ! -d $PACKAGES_PATH/rfs/android_$PORTFOLIO/packages/apps/Settings/src ]; then
+	cd $PACKAGES_PATH/rfs/android_$PORTFOLIO
+	echo "repo sync ..." && repo sync
+	[ $? != 0 ] && fbprint_e "Android repo sync failed" && return 1
+	fbprint_d "android repo sync"
+
+	# for Layerscape platforms with external PCIe display card in case no native GPU display
+	if [ "$CONFIG_EXTERNAL_GRAPHICS" = "y" ]; then
+	    if [ ! -f $PACKAGES_PATH/rfs/android_$PORTFOLIO/.patchdone ]; then
+		patch -d frameworks/base -p1 < device/nxp/layerscape/android_frameworks_base.patch && \
+		patch -d frameworks/native -p1 < device/nxp/layerscape/android_frameworks_native.patch && \
+		touch .patchdone
+	    fi
+	fi
+	[ $PORTFOLIO != layerscape ] && git clone $imx_vendor_repo_url vendor/imx && mv vendor/imx/nxp/* vendor/nxp/
+    fi
+
+    echo "Building $PACKAGES_PATH/rfs/android_$PORTFOLIO ..."
+    cd $PACKAGES_PATH/rfs/android_$PORTFOLIO
+    source build/envsetup.sh
+    export LC_ALL=C
+    lunch $build_type
+    make -j $JOBS
+    [ $? != 0 ] && fbprint_e "Building Android failed" && return 1
+    fbprint_d "Build Android $PORTFOLIO"
+}
+
+generate_distro_rfs() {
+    mkdir -p $RFSDIR
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ]; then
+	build_distro_rfs_ubuntu
+    elif [ $DISTROTYPE = centos ]; then
+	build_distro_rfs_centos
+    elif [ $DISTROTYPE = android ]; then
+	build_distro_rfs_android
+    elif [ $DISTROTYPE = buildroot ]; then
+	build_distro_rfs_buildroot
+    elif [ $DISTROTYPE = yocto ]; then
+        build_distro_rfs_yocto
+    fi
+}
+
+check_http_request() {
+    retcode=$(curl -I -m 10 -o /dev/null -s -w %{http_code} $1) || true
+    if [ $retcode != 000 -a ${retcode:0:1} != 2 -a ${retcode:0:1} != 3 ]; then
+        fbprint_e "ERROR: HTTP returned $retcode, failed to access $1"
+        fbprint_e "Please check your network to ensure $1 is accessable via HTTP from this machine"
+        fbprint_e "Please check HTTP proxy settings if it is needed in your environment" && exit
+    fi
+    [ $retcode != 200 -a $retcode != 000 ] && fbprint_e "The requested URL $1 returned error $retcode" && exit 1 || true
+}
+
+download_distro_images() {
+    [ $DISTROTYPE != ubuntu ] && echo only ubuntu flavor userland is downloadable for prebuilt LSDK userland && exit
+    [ "$MACHINE" = all ] && fbprint_e "Please specify -m machine" && exit
+    flex-installer -i download -m $MACHINE
+}
+
+get_prebuilt_initrd() {
+    tfile=rootfs_${DISTRIB_VERSION}_yocto_tiny_${DESTARCH}.cpio.gz
+    rdfile=$PACKAGES_PATH/rfs/initrd/$tfile
+    if [ ! -f $rdfile ]; then
+	[ $HOSTARCH = x86_64 ] && check_http_request $initrd_bin_url/$tfile
+	wget --progress=bar:force $initrd_bin_url/$tfile -O $rdfile
+    fi
+}
+
+convert_rfs_raw_to_ext4() {
+    # $1: $rawrfs
+    [ -z "$1" ] && rawrfs=$FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH} || rawrfs=$1
+    [ $DISTROSCALE = lite -o $DISTROSCALE = tiny ] && size=1G || size=5G
+    [ -n "$BUILDARG" ] && size=$BUILDARG
+    if [ ! -f $rawrfs/etc/buildinfo ]; then
+	echo $rawrfs not exist, generating it ..
+	flex-builder -i mkrfs -r $DISTROTYPE:lite -a $DESTARCH -f $CONFIGLIST
+    fi
+    local rfsname=${rawrfs##*/}
+    rfsname=$FBOUTDIR/images/$rfsname.ext4
+    echo Creating $size $rfsname ...
+    qemu-img create -f raw $rfsname $size
+    if mount | grep $FBOUTDIR/images/gstrfsmnt; then
+	sudo umount $FBOUTDIR/images/gstrfsmnt
+    fi
+    mkfs.ext4 -F $rfsname
+    mkdir -p $FBOUTDIR/images/gstrfsmnt
+    if ! mount | grep $FBOUTDIR/images/gstrfsmnt; then
+	sudo mount -o loop $rfsname $FBOUTDIR/images/gstrfsmnt
+    fi
+    sudo cp -a $rawrfs/. $FBOUTDIR/images/gstrfsmnt/
+    if mount | grep $FBOUTDIR/images/gstrfsmnt; then
+	sudo umount $FBOUTDIR/images/gstrfsmnt
+    fi
+    rm -rf $FBOUTDIR/images/gstrfsmnt
+    echo compressing $rfsname ...
+    tar czf $rfsname.gz $rfsname && rm -f $rfsname
+    fbprint_d $rfsname.gz
+}
+
+pack_distro_rfs() {
+    [ -f $RFSDIR/etc/buildinfo ] || { fbprint_e "$RFSDIR is incomplete"; exit; }
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ]; then
+	test -c $RFSDIR/dev/pts/0 && sudo umount $RFSDIR/dev/pts
+	test -f $RFSDIR/proc/uptime && sudo umount $RFSDIR/proc
+    fi
+    local destpath=${RFSDIR##*/}
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian -o $DISTROTYPE = centos ]; then
+	tarballname=${destpath}_`date +%Y%m%d%H%M`.tgz
+    elif [ $DISTROTYPE = buildroot ]; then
+	destpath=rootfs_${DISTRIB_VERSION}_buildroot_${DISTROSCALE}_${DESTARCH}${endiantype}
+	tarballname=${destpath}_`date +%Y%m%d%H%M`.tgz
+    elif [ $DISTROTYPE = yocto ]; then
+        destpath=rootfs_${DISTRIB_VERSION}_yocto_${DISTROSCALE}_${DESTARCH}
+        tarballname=${destpath}_`date +%Y%m%d%H%M`.tgz
+    fi
+    echo Generating $tarballname ...
+    cd $RFSDIR && sudo tar czf $FBOUTDIR/images/$tarballname *
+    cd $FBOUTDIR/images && ln -sf $tarballname $FBOUTDIR/images/${destpath}.tgz && cd $FBDIR
+    ls -l $FBOUTDIR/images/${destpath}*
+    fbprint_d $FBOUTDIR/images/$tarballname
+}
+
+pack_app_components() {
+    local appsname=${DESTDIR##*/}
+    local appstarball=app_${appsname}_`date +%Y%m%d%H%M`
+    echo packing ${appstarball}.tgz ...
+    cd $FBOUTDIR/apps/$appsname && sudo tar czf $FBOUTDIR/images/${appstarball}.tgz *
+    cd $FBDIR && fbprint_d $FBOUTDIR/images/${appstarball}.tgz
+}
+
+merge_components() {
+    [ ! -f $RFSDIR/etc/buildinfo ] && generate_distro_rfs
+    [ $DISTROTYPE = buildroot ] && echo apps components have been installed in $RFSDIR && exit 0
+
+    # install apps components
+    if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ] && [ $DISTROSCALE = lite ] && [ $SOCFAMILY = LS ]; then
+	if [ $DESTARCH = arm64 ]; then
+	    echo Installing app components for $DISTROTYPE lite distro ...
+	    [  -f $DESTDIR/usr/local/bin/restool ] || flex-builder -c restool -a ${DESTARCH} -f $CONFIGLIST
+	    sudo mkdir -p $RFSDIR/usr/local/bin && sudo cp -f $DESTDIR/usr/local/bin/{ls-*,restool} $RFSDIR/usr/local/bin
+	    [ -f $DESTDIR/usr/local/bin/fmc ] || flex-builder -c fmc -r ${DISTROTYPE}:lite -a ${DESTARCH} -f $CONFIGLIST
+	    [ -d $DESTDIR/etc/fmc/config/shared_mac ] || flex-builder -c eth_config -r ${DISTROTYPE}:lite -a ${DESTARCH} -f $CONFIGLIST
+	    [ -f $DESTDIR/usr/local/bin/tsntool ] || flex-builder -c tsntool -r ${DISTROTYPE}:lite -a ${DESTARCH} -f $CONFIGLIST
+	    sudo cp -f $DESTDIR/usr/local/bin/tsntool $RFSDIR/usr/bin && sudo cp -f $DESTDIR/usr/lib/libtsn.so $RFSDIR/usr/lib
+	    [ -f $DESTDIR/usr/bin/aiop_tool ] || flex-builder -c gpp_aioptool -r ${DISTROTYPE}:lite -a ${DESTARCH} -f $CONFIGLIST
+	    sudo cp -f $DESTDIR/usr/bin/aiop_tool $RFSDIR/usr/bin
+
+	    sudo mkdir -p $RFSDIR/usr/local/fmc && sudo mkdir -p $RFSDIR/usr/local/include/fmc
+	    sudo mkdir -p $RFSDIR/usr/local/lib/aarch64-linux-gnu
+	    sudo cp -f $DESTDIR/usr/local/lib/aarch64-linux-gnu/libfmc.a $RFSDIR/usr/local/lib/aarch64-linux-gnu/
+	    sudo cp -Prf --preserve=mode,timestamps $DESTDIR/etc/systemd/system $RFSDIR/etc/systemd
+	    sudo cp -Prf --preserve=mode,timestamps $DESTDIR/etc/fmc $RFSDIR/etc
+	    sudo cp -f $DESTDIR/lib/systemd/system/fmc.service $RFSDIR/lib/systemd/system
+	    sudo cp -f $DESTDIR/usr/local/include/fmc/fmc.h $RFSDIR/usr/local/include/fmc
+	    sudo cp -f $DESTDIR/usr/local/bin/fmc $RFSDIR/usr/local/bin
+	    sudo cp -f $DESTDIR/usr/local/fmc/init-ls104xa $RFSDIR/usr/local/fmc
+	fi
+	if [ -f $RFSDIR/etc/packages.list ] && ! grep -q 'App Component Package List' $RFSDIR/etc/packages.list; then
+	   sudo sed -i "1 i\\$DISTRIB_NAME Lite App Package List:" $RFSDIR/etc/packages.list
+	   [ $DESTARCH = arm64 ] && sudo sed -i "2 i\ fmc restool tsntool aiop_tool" $RFSDIR/etc/packages.list
+	   sudo sed -i "3 i\ " $RFSDIR/etc/packages.list
+	fi
+	exit 0
+    elif [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ] && [ $SOCFAMILY = LS ]; then
+	if [ ! -f $FBOUTDIR/apps/.app${DESTARCH}$DISTROTYPE -a $SOCFAMILY = LS ] && [ $HOSTARCH != aarch64 ]; then
+	    echo target apps components not present, building it ..
+	    flex-builder -c apps -a ${DESTARCH} -f $CONFIGLIST
+	fi
+	if [ $DESTDIR != $RFSDIR -a -d $DESTDIR/lib ]; then
+	    [ -d $DESTDIR/usr/local/dpdk4vpp ] && sudo rm -rf $DESTDIR/usr/local/dpdk4vpp
+	    for dir in lib bin sbin; do
+	        [ -d $DESTDIR/$dir ] && sudo cp -Prf --preserve=mode,timestamps $DESTDIR/$dir/* $RFSDIR/$dir/
+	    done
+	    ls -d $DESTDIR/* | grep -v -E "lib|bin|sbin" | xargs -I {} sudo cp -Prf --preserve=mode,timestamps {} $RFSDIR/
+	    [ -f ${DESTDIR}_eIQ/usr/local/bin/TfMnist-Armnn ] && \
+	    echo installing ${DESTDIR}_eIQ to $RFSDIR && \
+	    sudo cp -Prf --preserve=mode,timestamps --no-preserve=ownership ${DESTDIR}_eIQ/* $RFSDIR
+	fi
+	if [ -f $RFSDIR/etc/packages.list ] && ! grep -q 'App Component Package List' $RFSDIR/etc/packages.list; then
+	   sudo sed -i "1 i\\$DISTRIB_NAME App Component Package List:" $RFSDIR/etc/packages.list
+	   sudo sed -i "2 i\ $APPS_REPO_LIST" $RFSDIR/etc/packages.list
+	   sudo sed -i "3 i\ " $RFSDIR/etc/packages.list
+	fi
+	[ $VIRTABLE = y ] && sudo chroot $RFSDIR ldconfig
+    elif [ $DISTROTYPE = centos ] && [ $SOCFAMILY = LS ]; then
+	[ -d $DESTDIR/usr/local/bin ] || flex-builder -c apps -r centos -f $CONFIGLIST
+	echo Installing app in $DISTROTYPE ...
+	if [ "$DESTDIR" != "$RFSDIR" -a -d $DESTDIR/lib ]; then
+	    sudo cp -Prf --preserve=mode,timestamps $DESTDIR/lib/* $RFSDIR/lib/
+	    ls -d $DESTDIR/* | grep -v -E "lib|bin|sbin" | xargs -I {} sudo cp -Prf --preserve=mode,timestamps {} $RFSDIR/
+	fi
+    fi
+
+    # install PFE firmware to $RFSDIR/lib/firmware
+    if [ $CONFIG_MACHINE_LS1012ARDB = y -o $CONFIG_MACHINE_LS1012AFRWY = y ] && [ $SOCFAMILY = LS ]; then
+	[ -f $FBOUTDIR/firmware/pfe_bin/ls1012a/slow_path/ppfe_class_ls1012a.elf ] || \
+	flex-builder -c pfe_bin -f $CONFIGLIST
+
+	sudo mkdir -p $RFSDIR/lib/firmware
+	. $FBDIR/configs/board/ls1012ardb/manifest
+	sudo cp -f $pfe_kernel $RFSDIR/lib/firmware/
+    fi
+
+    # install linux-headers
+    curbrch=`cd $KERNEL_PATH && git branch | grep ^* | cut -d' ' -f2 && cd $FBDIR`
+    if [ $DISTROSCALE = main -o $DISTROSCALE = devel ] && [ $VIRTABLE = y ] && \
+       [ -d $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/output/$curbrch/debian/hdrtmp -a -d $RFSDIR ]; then
+	sudo rm -rf $RFSDIR/usr/src/linux-headers*
+	sudo cp -rf $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/output/$curbrch/debian/hdrtmp/usr $RFSDIR
+    fi
+
+    fbprint_d "merge app components into $RFSDIR"
+}
+
+check_component_valid() {
+    if ! echo $APPS_ALL_LIST misc eiq generic security networking multimedia | grep -q $1 && \
+       ! echo $LINUX_ALL_LIST | grep -q $1 && \
+       ! echo $EIQ_ALL_LIST | grep -q $1 && \
+       ! echo $FIRMWARE_REPO_LIST | grep -q $1; then
+	fbprint_e "Invalid component name: $1"
+	fbprint_n "\nValid app component:\n $APPS_ALL_LIST"
+	fbprint_n "\nValid linux component:\n $LINUX_ALL_LIST"
+	fbprint_n "\nValid firmware component:\n $FIRMWARE_REPO_LIST"
+	fbprint_n "\nValid eIQ component:\n $EIQ_ALL_LIST"
+	exit
+    fi
+}
+
+git_repo_update() {
+    if [ -n "$BUILDARG" ]; then
+	check_component_valid $BUILDARG
+	reponame=`echo $BUILDARG | sed 's/-/_/'`
+	branch=`grep -E "^${reponame}_repo_branch" $FBDIR/configs/$CONFIGLIST | cut -d= -f2`
+	commit=`grep -E "^${reponame}_repo_commit" $FBDIR/configs/$CONFIGLIST | cut -d= -f2`
+	repourl=`grep -E "^${reponame}_repo_url" $FBDIR/configs/$CONFIGLIST | cut -d= -f2`
+	tag=`grep -E "^${reponame}_repo_tag" $FBDIR/configs/$CONFIGLIST | cut -d= -f2`
+    fi
+    [ "$CONFIG_EIQ" = y ] && eiqdir=apps/eiq
+    pkgdirlist="firmware linux apps/generic apps/networking apps/multimedia apps/security $eiqdir"
+    for pdn in $pkgdirlist; do
+	if echo $pdn | grep -q / ; then insubdir=y; fi
+	[ "$insubdir" = y ] && subprefix=$(echo $pdn | cut -d/ -f2)_
+	if [ $1 = fetch ]; then
+	    if [ -n "$BUILDARG" ]; then
+		export NOBUILD=y
+		pkgdn=`echo $pdn | tr a-z A-Z`
+		[ ${pdn:0:4} = apps ] && repolist=$APPS_ALL_LIST || \
+		repolist=`eval echo '${'"$pkgdn"'_REPO_LIST}'`
+		if ! echo $repolist | grep -q $BUILDARG; then continue; fi
+		[ "$insubdir" = y ] && mkfile=$FBDIR/packages/$pdn/*.mk || mkfile=$FBDIR/packages/$pdn/Makefile
+		mkrepolist="$(grep 'REPO_LIST =' $mkfile | cut -d= -f2)"
+		if ! echo $mkrepolist | grep -q $BUILDARG; then continue; fi
+		if [ -n "$tag" ]; then
+		    git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG tag $tag $repourl
+		elif [ -n "$commit" ]; then
+		    git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG commit $commit $repourl
+		elif [ -n "$branch" ]; then
+		    git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG branch $branch $repourl
+		fi
+		fbprint_n "$BUILDARG in $PACKAGES_PATH/$pdn"
+		break
+	    else
+		[ "$insubdir" = y ] && make -C $FBDIR/packages/apps ${subprefix}repo_fetch || \
+		make -C $FBDIR/packages/$pdn ${subprefix}repo_fetch
+	    fi
+	elif [ $1 = latest ]; then
+	    if [ -n "$BUILDARG" -a -z "$branch" -a -n "$commit" ]; then
+                echo commit = $commit; break;
+	    elif [ -n "$BUILDARG" -a -z "$branch" ]; then
+		echo branch of $BUILDARG repo is not specified in $CONFIGLIST!; exit
+	    elif [ -n "$BUILDARG" -a -n "$branch" ] && [ -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		cd $PACKAGES_PATH/$pdn/$BUILDARG && git pull origin $branch && git fetch --tags && cd -
+	    elif [ -n "$BUILDARG" ] && [ ! -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		continue
+	    else
+		[ "$insubdir" = y ] && make -C $FBDIR/packages/apps ${subprefix}repo_update_latest || \
+		make -C $FBDIR/packages/$pdn ${subprefix}repo_update_latest
+	    fi
+	elif [ $1 = commit ]; then
+	    if [ -n "$BUILDARG" -a -z "$commit" ]; then
+		echo commit of $BUILDARG repo is not specified in $CONFIGLIST!; exit
+	    elif [ -n "$BUILDARG" ] && [ ! -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		continue;
+	    elif [ -n "$BUILDARG" -a -n "$commit" ] && [ -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG commit $commit
+	    else
+		[ "$insubdir" = y ] && make -C $FBDIR/packages/apps ${subprefix}repo_update_commit || \
+		make -C $FBDIR/packages/$pdn ${subprefix}repo_update_commit
+	    fi
+	elif [ $1 = tag ]; then
+	    if [ -n "$BUILDARG" -a -z "$tag" ]; then
+		echo tag of $BUILDARG repo is not specified in $CONFIGLIST; exit
+	    elif [ -n "$BUILDARG" ] && [ ! -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		continue;
+	    elif [ -n "$BUILDARG" -a -n "$tag" ] && [ -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG tag $tag
+	    else
+		[ "$insubdir" = y ] && make -C $FBDIR/packages/apps ${subprefix}repo_update_tag || \
+		make -C $FBDIR/packages/$pdn ${subprefix}repo_update_tag
+	    fi
+	elif [ $1 = branch ]; then
+	    if [ -n "$BUILDARG" -a -z "$branch" ]; then
+		echo branch of $BUILDARG repo is not specified in $CONFIGLIST!; exit
+	    elif [ -n "$BUILDARG" -a -n "$branch" ] && [ -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		git_repo_checkout $PACKAGES_PATH/$pdn $BUILDARG branch $branch
+	    elif [ -n "$BUILDARG" ] && [ ! -d $PACKAGES_PATH/$pdn/$BUILDARG ]; then
+		continue;
+	    else
+		[ "$insubdir" = y ] && make -C $FBDIR/packages/apps ${subprefix}repo_update_branch || \
+		make -C $FBDIR/packages/$pdn ${subprefix}repo_update_branch
+	    fi
+	fi
+    done
+}
+
+git_repo_checkout() {
+# $1:pkgdir, $2:gittree, $3:type of branch/tag/commit, $4:name of branch/tag/commit, $5:repo_url
+    cd $1
+    repourl=`eval echo '${'"$2""_repo_url"'}'`
+    [ -z "$repourl" ] && repourl=$GIT_REPOSITORY_URL/$2
+
+    if [ $2 = linux ]; then
+	tree=$KERNEL_TREE
+    elif [ $2 = uboot -a $SOCFAMILY = LS ]; then
+	tree=$UBOOT_TREE
+    elif [ $2 = rcw ]; then
+	tree=$RCW_TREE
+    else
+	tree=$2
+    fi
+
+    if [ ! -d $tree ]; then
+	if [ $3 = branch ]; then
+	    [ -n "$5" ] && git clone $5 $tree -b $4 || git clone $repourl -b $4
+	elif [ $3 = tag -o $3 = commit ]; then
+	    if [ -n "$5" ]; then
+		git clone $5 $tree && cd $tree && git checkout $4 -b $4
+	    else
+		git clone $repourl $tree && cd $tree && git checkout $4 -b $4
+	    fi
+	fi
+    else
+	cd $tree
+	if ! git show-ref --verify --quiet refs/heads/$4; then
+	    if [ $3 = branch ]; then
+		git checkout remotes/origin/$4 -b $4
+	    elif [ $3 = tag -o $3 = commit ]; then
+		git checkout $4 -b $4
+	    fi
+	else
+	    git checkout $4
+	fi
+    fi
+    cd $FBDIR
+}
+
+check_binfmt_qemu() {
+    if grep -q Ubuntu /etc/issue; then
+	[ -f /usr/bin/qemu-aarch64-static ] || sudo apt install -y binfmt-support qemu-system-common qemu-user-static
+    fi
+    if ! grep -q binfmt_misc /proc/filesystems; then
+	sudo modprobe binfmt_misc
+    fi
+}
+
+flexbuild_launch_docker() {
+    dnum=$(echo $FBDIR | md5sum | cut -b 1-6)
+    containername=${username}_${fbdockerrepo}_${DISTRIB_VERSION}_${dnum}
+    if ! docker ps -a | grep -q $containername; then
+	if ! docker ps -a | grep -q ' ${fbdockerrepo}:${fbdockerimgversion}'; then
+	    make -C $FBDIR/docker/${fbdockerrepo:2}
+	fi && \
+	docker run -t -i -h fbubuntu --name="$containername" --privileged=true --net=host \
+	       -v $HOME:$HOME -v $FBDIR:$FBDIR -v /lib/modules:/lib/modules -v /dev:/dev \
+	       -v /etc/localtime:/etc/localtime:ro \
+	       -w $FBDIR ${fbdockerrepo}:${fbdockerimgversion} /bin/bash
+    elif docker ps -a | grep $containername | grep -q Exited; then
+	docker start $containername
+	docker attach $containername
+    else
+	docker attach $containername
+    fi
+}
+
+host_connect_target(){
+    [ -z "$1" ] &&  fbprint_w "Usage: flex-builder connect <IP_address> [ <local_dir> ]" && exit
+    [ -n "$2" ] && localmntdir=$2 || localmntdir=$RFSDIR
+    if cat /etc/mtab | grep -q $1; then
+	localmntdir=`cat /etc/mtab | grep $1 | cut -d' ' -f2`
+	fbprint_w "$1 is already connected to local $localmntdir" && exit
+    fi
+    if ! echo $1 | grep -q @; then optuser=root@; fi
+    if ! echo $1 | grep -q :; then optdir=":/"; fi
+    [ -f /usr/bin/sshfs ] || sudo apt install -y sshfs
+    mkdir -p $localmntdir
+    sshfs -o nonempty,reconnect,exec,allow_other -o idmap=user,uid=`id -u`,gid=`id -g` \
+	  -p22 ${optuser}${1}$optdir $localmntdir && \
+    fbprint_n "Successfully connected ${1}$optdir to $localmntdir" && \
+    fbprint_n "Now you can read/write remote rootfs via local $localmntdir"
+    fbprint_n "e.g. run 'flex-builder push <kernel|app|eiq> <IP_address>' to push image to target board"
+}
+
+host_disconnect_target(){
+    localmntdir=`cat /etc/mtab | grep  $1 | cut -d' ' -f2`
+    if cat /etc/mtab | grep -q $1; then sudo umount $localmntdir; fi
+}
+
+host_push_image_to_target() {
+# $1: kernel|apps  $2: IP address of target
+    [ -z "$2" ] && fbprint_w "Usage: flex-builder push <kernel|apps|eiq> <IP_address>" && exit
+    if ! cat /etc/mtab | grep -q $2; then
+        fbprint_w "$2 is not connected yet, please run 'flex-builder connect $2'" && exit
+    fi
+    localmntdir=`cat /etc/mtab | grep $2 | cut -d' ' -f2 | head -1`
+    curbrch=`cd $KERNEL_PATH && git branch | grep ^* | cut -d' ' -f2`
+    if [ $1 = kernel ]; then
+	[ ! -f $kernel_img ] && fbprint_n "Generating kernel image ..." && generate_kernel_img
+	[ -d $localmntdir/boot ] && fbprint_n "Pushing kernel to target $2 ..." && \
+	find $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY -maxdepth 1 -type f -exec cp -f {} $localmntdir/boot/ \;
+	[ -d $localmntdir/boot/modules ] && fbprint_n "Pushing modules to target $2 ..." && \
+	cp -rf $KERNEL_OUTPUT_PATH/$curbrch/tmp/lib/modules/* $localmntdir/boot/modules/
+	fbprint_d "Push kernel and modules to target $2"
+    elif [ $1 = apps -o $1 = eiq ]; then
+	[ $1 = eiq ] && srcdir=${DESTDIR}_eIQ || srcdir=$DESTDIR
+	[ "`find $srcdir -type f`" = "" ] && fbprint_w "$srcdir is empty, please run 'flex-builder -c <component>' to generate the apps" && exit
+	fbprint_n "Pushing apps $srcdir to target $2 ..."; cp -Prf --preserve=mode,timestamps $srcdir/* $localmntdir/ && \
+	fbprint_d "Push apps $srcdir to target $2"
+    else
+	fbprint_w "Invalid parameter $1, valid parameter is: kernel, apps, eiq"; exit
+    fi
+}
+
+generate_kernel_img() {
+    if [ $DESTARCH = arm64 -o $DESTARCH = arm32 ]; then
+	    flex-builder -c linux -a $DESTARCH -p $SOCFAMILY -f $CONFIGLIST
+    elif [ $DESTARCH = ppc64 -o $DESTARCH = ppc32 ]; then
+	flex-builder -c linux -a $DESTARCH -f $CONFIGLIST
+    fi
+    rm -f $KERNEL_PATH/arch/$tarch/configs/{lttng.config,ima_evm_$DESTARCH.config}
+    if [ $DESTARCH = arm64 -a ! -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/fsl-lx2162a-qds.dtb ] && \
+       [ -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/fsl-lx2160a-qds.dtb ]; then #trick for 4.19
+	cd $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY && cp -f fsl-lx2160a-qds.dtb fsl-lx2162a-qds.dtb && cd -
+    fi
+}
+
+generate_composite_fw_uboot() {
+    # generate uboot-based composite firmware
+    if [ $SOCFAMILY = LS ]; then
+	for brd in $machinelist; do
+	    for boottype in $boottypelist; do
+		if [ "$1" = secureboot ]; then
+		    [ ${brd:0:5} = lx216 ] && secopt="-s -T arm-cot" || secopt="-s"
+		    [ $brd = lx2162aqds ] && flex-builder -i mkfw -m $brd -b $boottype -s -T arm-cot-with-verified-boot -f $CONFIGLIST || \
+		    flex-builder -i mkfw -m $brd -b $boottype -B uboot $secopt -a $DESTARCH -f $CONFIGLIST
+		else
+		    flex-builder -i mkfw -m $brd -b $boottype -B uboot -a $DESTARCH -f $CONFIGLIST
+		fi
+	    done
+	done
+    fi
+
+    if [ $SOCFAMILY = IMX ]; then
+	imxlist32=`grep CONFIG_MACHINE_IMX6 $FBDIR/configs/$CONFIGLIST |grep y|cut -b 16-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+	imxlist64=`grep CONFIG_MACHINE_IMX8 $FBDIR/configs/$CONFIGLIST |grep y|cut -b 16-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+	if [ $DESTARCH = arm64 ]; then
+	    imxlist=$imxlist64
+	elif [ $DESTARCH = arm32 ]; then
+	    imxlist=$imxlist32
+	fi
+	for brd in $imxlist; do
+	    flex-builder -i mkfw -m $brd -p imx -f $CONFIGLIST
+	done
+    fi
+}
+
+generate_composite_fw_uefi() {
+    # generate UEFI-based composite firmware
+    if [ $MACHINE = all ]; then
+	uefibrdlist=$uefi_machine_list
+    elif [ $MACHINE = ls1043ardb -o $MACHINE = ls1046ardb -o $MACHINE = ls2088ardb -o ${MACHINE:0:10} = lx2160ardb ]; then
+	uefibrdlist=$MACHINE
+    else
+	uefibrdlist=""
+    fi
+    for brd in $uefibrdlist; do
+	if ! echo $LS_MACHINE_LIST | grep -q $brd; then continue; fi
+	if [ $DESTARCH = arm32 ]; then continue; fi
+	for boottype in $boottypelist; do
+	    flex-builder -i mkfw -m $brd -b $boottype -B uefi -a $DESTARCH -f $CONFIGLIST
+	done
+    done
+}
+
+generate_distro_boot_script() {
+    # generate distro boot.scr
+    if [ $DESTARCH = arm32 -a $SOCFAMILY = LS ]; then
+	generate_distro_bootscr ls1021atwr ls1021aqds
+    else
+	for brd in $machinelist; do
+	    generate_distro_bootscr $brd
+	done
+    fi
+}
+
+
+generate_all_composite_fw() {
+    [ -f $kernel_img ] || generate_kernel_img layerscape
+
+    # build phy-firmware, mc-firmware for <machine>
+    flex-builder -c bin_firmware -m $MACHINE -a $DESTARCH -f $CONFIGLIST
+
+    # generate distro uboot bootscr
+    generate_distro_boot_script
+
+    # generate uefi-based composite firmware
+    test $DESTARCH = arm64 && generate_composite_fw_uefi
+
+    # generate uboot-based composite firmware without secureboot support
+    generate_composite_fw_uboot
+
+    # generate uboot-based composite firmware with secureboot support
+    [ "$CONFIG_APP_CST" = y ] && generate_composite_fw_uboot secureboot
+
+    fbprint_d "$DESTARCH: Build all composite firmware"
+}
+
+build_ubuntu_lite() {
+    flex-builder -i mkrfs -r ubuntu:lite:$CODENAME -a $DESTARCH -f $CONFIGLIST
+    flex-builder -i merge-component -r ubuntu:lite:$CODENAME -a $DESTARCH -f $CONFIGLIST
+    flex-builder -i packrfs -r ubuntu:lite:$CODENAME -a $DESTARCH -f $CONFIGLIST
+    flex-builder -i rfsraw2ext -r ubuntu:lite:$CODENAME -a $DESTARCH -f $CONFIGLIST
+}
+
+build_rfs_apps() {
+    # $1: imx or layerscape
+
+    [ "$BUILD_UBUNTU_LITE" = y ] && build_ubuntu_lite
+
+    if [ ! -f $RFSDIR/etc/buildinfo ]; then
+	[ "$BUILD_UBUNTU_MAIN" = y ] && flex-builder -i mkrfs -r ubuntu:main -a $DESTARCH -p $1 -f $CONFIGLIST
+	if [ "$BUILD_UBUNTU_DEVEL" = y -a $DISTROSCALE != devel ]; then
+	    echo Building for ubuntu:devel userland ...
+	    flex-builder -i mkrfs -r ubuntu:devel -a $DESTARCH -p $1 -f $CONFIGLIST
+	    [ "$CONFIG_APP_DOCKER_CE" = y ] && flex-builder -c docker_ce -r ubuntu:devel -a $DESTARCH -p $1 -f $CONFIGLIST
+	    [ "$CONFIG_APP_WESTON" = y ] && flex-builder -c weston -r ubuntu:devel -a $DESTARCH -p $1 -f $CONFIGLIST
+	fi
+    fi
+
+    [ $HOSTARCH != aarch64 ] && [ "$1" = layerscape -a "$BUILD_UBUNTU_MAIN" = y -a ! -f $FBOUTDIR/apps/.app${DESTARCH}$DISTROTYPE ] && \
+    flex-builder -c apps -r $DISTROTYPE:$DISTROSCALE -a $DESTARCH -p $1 -f $CONFIGLIST && \
+    touch $FBOUTDIR/apps/.app${DESTARCH}$DISTROTYPE
+
+    if [ "$CONFIG_EIQ" = y -a "$BUILD_UBUNTU_DEVEL" = y -a ! -f $FBDIR/packages/apps/eiq/.eiqdone ]; then
+	flex-builder -i clean-eiq -f $CONFIGLIST
+	flex-builder -c eiq -r ubuntu:devel -a $DESTARCH -f $CONFIGLIST
+	[ "$BUILD_UBUNTU_DEVEL" = y ] && \
+	flex-builder -i install-eiq -a $DESTARCH -r ubuntu:devel -f $CONFIGLIST
+    fi
+    fbprint_d "build rfs and apps"
+}
+
+merge_apps_to_rfs() {
+    # $1: layerscape or imx
+    flex-builder -i merge-component -r $DISTROTYPE:$DISTROSCALE -a $DESTARCH  -p $1 -f $CONFIGLIST
+
+    if [ "$BUILD_UBUNTU_DEVEL" = y -a $DISTROSCALE != devel ]; then
+	flex-builder -i merge-component -r ubuntu:devel -a $DESTARCH -p $1 -f $CONFIGLIST
+	[ -f ${DESTDIR}_eIQ/usr/local/bin/TfMnist-Armnn ] && \
+	echo installing ${DESTDIR}_eIQ to devel RFS ... && \
+        cp -Prf --preserve=mode,timestamps --no-preserve=ownership ${DESTDIR}_eIQ/* \
+	$FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_${SOCFAMILY}_${DESTARCH}_devel && \
+        cd ${DESTDIR}_eIQ && sudo tar czf $FBOUTDIR/images/app_${DESTDIR##*/}_eIQ.tgz * && cd -
+    fi
+
+    if [ $HOSTARCH = x86_64 -o $HOSTARCH = i686 ]; then
+	if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ]; then
+	    flex-builder -i packrfs -r $DISTROTYPE:$DISTROSCALE -a $DESTARCH -p $1 -f $CONFIGLIST
+	    if [ "$BUILD_UBUNTU_DEVEL" = "y" -a $DISTROSCALE != devel ]; then
+		flex-builder -i packrfs -r ubuntu:devel -a $DESTARCH -p $1 -f $CONFIGLIST
+	    fi
+	fi
+    fi
+    fbprint_d "$DESTARCH: Build $DISTROTYPE userland and apps components in $FBOUTDIR/images"
+}
+
+flex_auto_build() {
+    if echo "$BUILDARG" | grep -q fragment:; then
+	export FRAGMENT_CFG=$(echo $BUILDARG | cut -d: -f2); unset BUILDARG
+    elif [ -n "$BUILDARG" ]; then
+	fbprint_w "Warning: ignored invalid -B $BUILDARG for autobuild"; unset BUILDARG
+    fi
+
+    echo "Time of fetching repo: `date`"
+    [ -d $FBDIR/.git ] && echo Flexbuild HEAD commit: `git log -1 --oneline`
+
+    flex-builder -i repo-fetch -f $CONFIGLIST
+
+    if [ "$UPDATE_REPO_PER_TAG" = y ]; then
+	flex-builder -i repo-tag -f $CONFIGLIST
+    elif [ "$UPDATE_REPO_PER_COMMIT" = y ]; then
+	flex-builder -i repo-commit -f $CONFIGLIST
+    else
+	# update all repos to latest commit by default
+	flex-builder -i repo-update -f $CONFIGLIST
+    fi
+
+    echo "Time of build: `date`"
+    starttime=`date +'%Y-%m-%d %H:%M:%S'`
+
+    check_linux_config
+
+    if [ "$BUILD_LAYERSCAPE_IMAGE" = y -a $SOCFAMILY = LS ]; then
+	# fmc and tsntool are built against yocto:devel only, then install them into yocto:tiny
+	if [ "$BUILD_YOCTO_RFS" = y ]; then
+	    flex-builder -i mkrfs -r yocto:devel -a $DESTARCH -f $CONFIGLIST && \
+	    flex-builder -i mkrfs -r yocto:tiny -a $DESTARCH -f $CONFIGLIST
+	fi
+
+	# if BUILD_DUAL_KERNEL=y is enabled, build kernel low version prior to default version
+	if [ "$BUILD_DUAL_KERNEL" = y ] && [ -d $KERNEL_PATH ] && [ $SOCFAMILY = LS ]; then
+	    # switch to the second version branch/tag of linux repo
+	    cd $KERNEL_PATH && . $FBDIR/tools/repo_version.sh linux second; cd $FBDIR
+	    generate_kernel_img
+	    [ $DESTARCH = arm64 ] && flex-builder -c perf -a $DESTARCH -f $CONFIGLIST
+	    [ "$CONFIG_KERL_GPU_MODULE" = y -a $DESTARCH = arm64 ] && flex-builder -c gpu_module -f $CONFIGLIST
+	    [ "$CONFIG_APP_SECURE_OBJ" = y -a $DESTARCH = arm64 ] && flex-builder -c secure_obj -f $CONFIGLIST
+
+	    # generate boot partition with the second version of linux kernel
+	    flex-builder -i mkbootpartition -a $DESTARCH -p $SOCFAMILY -s -f $CONFIGLIST
+	    rm -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/{*Image*,*.dtb,config*,System.map*,vmlinuz*,perf}
+	    rm -rf $FBOUTDIR/firmware/secboot_hdrs
+	    cd $KERNEL_PATH && . $FBDIR/tools/repo_version.sh linux # back to the default kernel version
+	    cd $FBDIR
+	fi
+
+	# build kernel default version
+	generate_kernel_img
+	flex-builder -i mkitb -r yocto:tiny -a $DESTARCH -f $CONFIGLIST
+	[ $DESTARCH = arm64 ] && flex-builder -c perf -a $DESTARCH -f $CONFIGLIST
+	flex-builder -i mkflashscr -f $CONFIGLIST
+
+	[ $DESTARCH = arm64 ] && generate_composite_fw_uefi
+	generate_composite_fw_uboot
+	generate_composite_fw_uboot secureboot
+	build_rfs_apps layerscape
+	flex-builder -i mkbootpartition -a $DESTARCH -p $SOCFAMILY -s -f $CONFIGLIST
+	merge_apps_to_rfs layerscape
+    fi
+
+    if [ "$BUILD_IMX_IMAGE" = y -o $SOCFAMILY = IMX ]; then
+	flex-builder -c linux -a $DESTARCH -p imx -f $CONFIGLIST
+	flex-builder -i mklinux -r yocto:tiny -a $DESTARCH -p imx -f $CONFIGLIST
+	flex-builder -i mkdistroscr -p $SOCFAMILY -f $CONFIGLIST
+	[ $DESTARCH = arm32 ] && imx_list="imx6qsabresd imx6qpsabresd imx6sllevk imx7ulpevk"
+	[ $DESTARCH = arm64 ] && imx_list="imx8mqevk imx8mmevk imx8mnevk imx8qmmek imx8qxpmek"
+	for brd in $imx_list; do
+	    flex-builder -i mkfw -m $brd -f $CONFIGLIST
+	done
+	flex-builder -i mkbootpartition -a $DESTARCH -p imx -f $CONFIGLIST
+	build_rfs_apps imx
+	merge_apps_to_rfs imx
+    fi
+
+    if [ "$BUILD_UBUNTU_MATE" = y -a $DESTARCH = arm64 -a $HOSTARCH != aarch64 ]; then
+	flex-builder -i mkrfs -r ubuntu:mate -f $CONFIGLIST && flex-builder -c apps -r ubuntu:mate -f $CONFIGLIST && \
+	flex-builder -i merge-component -r ubuntu:mate -f $CONFIGLIST && flex-builder -i packrfs -r ubuntu:mate -f $CONFIGLIST
+    fi
+
+    if [ "$BUILD_CENTOS_RFS" = y -a $DESTARCH = arm64 ]; then
+	flex-builder -i mkrfs -r centos -a $DESTARCH -f $CONFIGLIST
+	flex-builder -i merge-component -r centos -a $DESTARCH -f $CONFIGLIST
+	flex-builder -i packrfs -r centos -a $DESTARCH -f $CONFIGLIST
+    fi
+
+    [ "$BUILD_BUILDROOT_RFS" = y ] && flex-builder -i mkrfs -r buildroot:tiny -a $DESTARCH -f $CONFIGLIST && \
+    flex-builder -i mklinux -r buildroot:tiny -a $DESTARCH -f $CONFIGLIST
+
+    cp $FBDIR/tools/flex-installer $FBOUTDIR/images
+    [ -f $PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_yocto_tiny_${DESTARCH}.cpio.gz ] && \
+    cp $PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_yocto_tiny_${DESTARCH}.cpio.gz $FBOUTDIR/images
+    [ -f $FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_yocto_tiny_${DESTARCH}/target/etc/buildinfo ] && \
+    flex-builder -i packrfs -r yocto:tiny -a $DESTARCH -f $CONFIGLIST
+    cp -f $FBDIR/configs/$CONFIGLIST $FBOUTDIR/images
+    ls -go $FBOUTDIR/images
+
+    fbprint_n "Build Done: `date`"
+    endtime=`date +'%Y-%m-%d %H:%M:%S'`
+    start_seconds=$(date --date="$starttime" +%s)
+    end_seconds=$(date --date="$endtime" +%s)
+    spent=$((end_seconds-start_seconds))
+    mins=`expr $(echo $(($spent))) / 60`
+    secs=`expr $(echo $(($spent))) % 60`
+    fbprint_n "Auto build for $DESTARCH: $mins minutes $secs seconds"
+}
+
+flex_autobuild_all() {
+    flex-builder -i auto_build -a $DESTARCH -f $CONFIGLIST 2>&1 | \
+    tee $FBDIR/logs/autobuild-${DESTARCH}-log-`date +%Y%m%d%H%M`.txt
+}
+
+secure_sign_image() {
+    # $1: <machine>,  $2: <boottype>
+    [ ! -f $FBDIR/configs/board/$1/manifest ] && echo $FBDIR/configs/board/$1/manifest not exist! && exit
+    [ -f $PACKAGES_PATH/apps/security/cst/uni_sign ] || flex-builder -c cst -f $CONFIGLIST
+    . $FBDIR/configs/board/$1/manifest
+    secureboot_headers=`eval echo '${'"secureboot_headers_""$2"'}'`
+    [ -z "$secureboot_headers" ] && return
+
+    [ -f $distro_bootscript ] || flex-builder -i mkdistroscr -m $1 -a $DESTARCH -f $CONFIGLIST
+    [ "$IMA_EVM" = y -a ! -f $bootscript_enforce ] && flex-builder -i mkdistroscr -t -m $1 -f $CONFIGLIST
+    [ "$ENCAP" = y -a ! -f $bootscript_dec ] && flex-builder -i mkdistroscr -e -m $1 -f $CONFIGLIST
+
+    [ ! -f $kernel_img ] && echo $kernel_img not exist, generating it ... && generate_kernel_img
+    [ ! -f $tiny_itb ] && flex-builder -i mklinux -r yocto:tiny -a $DESTARCH -p $SOCFAMILY -f $CONFIGLIST
+
+    fbprint_n "Signing $2boot images for $1 ..."
+    [ "$ENCAP" = y ] && cp $bootscript_dec $PACKAGES_PATH/apps/security/cst/bootscript_dec && echo "Copying bootscript_decap"
+
+    if [ "$IMA_EVM" = y ]; then
+	[ -f $PACKAGES_PATH/rfs/initrd/initramfs_imaevm_${DESTARCH}.img ] || \
+	flex-builder -i mkrfs -r buildroot:imaevm -a $DESTARCH -f $CONFIGLIST
+	cp -f $PACKAGES_PATH/rfs/initrd/initramfs_imaevm_${DESTARCH}.img $FBOUTDIR/images
+	cp -f $PACKAGES_PATH/rfs/initrd/initramfs_imaevm_${DESTARCH}.img \
+	$PACKAGES_PATH/apps/security/cst/initramfs.img && echo "Copying initramfs.img"
+	cp -f $bootscript_enforce $PACKAGES_PATH/apps/security/cst/bootscript_enforce && echo "Copying bootscript_enforce"
+    fi
+
+    cd $PACKAGES_PATH/apps/security/cst && \
+    rm -f bootscript uImage.dtb uImage.bin kernel.itb secboot_hdrs*.bin hdr*.out && \
+    cp -f $distro_bootscript bootscript && echo "Copying bootscript" && \
+    cp -f $device_tree uImage.dtb && echo "Copying dtb" && \
+    cp -f $tiny_itb kernel.itb && echo "Copying linux tiny itb" && \
+    cp -f $kernel_img uImage.bin && echo "Copying kernel" && cd -
+
+    rcwimg_sec=`eval echo '${'"rcw_""$2"'_sec}'`
+    rcwimg_nonsec=`eval echo '${'"rcw_""$2"'}'`
+    if [ -z "$rcwimg_nonsec" ] || ! echo $rcwimg_nonsec | grep -q $1; then
+	echo ${2}boot on $1 is not supported && return
+    fi
+
+    # for platforms without ATF support
+    if [ ${1:0:7} = ls1021a ]; then
+	ubootimg_sec=`eval echo '${'"uboot_""$2"'boot_sec}'`
+	[ -z "$ubootimg_sec" ] && echo ${2}boot on $1 for secureboot unsupported && return
+	[ -f $ubootimg_sec ] || flex-builder -c u-boot -m $1 -b $2 -f $CONFIGLIST
+	if [ $2 = nor -o $2 = qspi ]; then
+	    cp $ubootimg_sec $PACKAGES_PATH/apps/security/cst/u-boot-dtb.bin
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    [ -z "$uboot_sdboot_sec" ] && echo ${2}boot on $1 for secureboot unsupported && return
+	    [ -f $uboot_sdboot_sec ] || flex-builder -c uboot -m $1 -b $2 -f $CONFIGLIST
+	    cp -f $uboot_sdboot_sec $PACKAGES_PATH/apps/security/cst/u-boot-with-spl-pbl.bin
+	    cp -f $uboot_spl $PACKAGES_PATH/apps/security/cst/u-boot-spl.bin
+	    cp -f $uboot_dtb $PACKAGES_PATH/apps/security/cst/u-boot-dtb.bin
+	fi
+    fi
+    [ -f $pfe_fw ] || flex-builder -c pfe_bin -f $CONFIGLIST
+    [ ${1:0:7} = ls1012a ] && cp $pfe_fw $PACKAGES_PATH/apps/security/cst/pfe.itb && echo "Copying PFE"
+
+    if [ ${1:0:7} = ls1088a -o ${1:0:7} = ls2088a -o ${1:0:5} = lx216 ]; then
+	[ -f $dpaa2_mc_fw ] || flex-builder -c mc_bin -f $CONFIGLIST
+	[ -f $dpaa2_mc_dpc ] || flex-builder -c mc_utils -f $CONFIGLIST
+	[ -f $dpaa2_mc_fw ] && cp $dpaa2_mc_fw $PACKAGES_PATH/apps/security/cst/mc.itb
+	[ -f $dpaa2_mc_dpc ] && cp $dpaa2_mc_dpc $PACKAGES_PATH/apps/security/cst/dpc.dtb
+	[ -f $dpaa2_mc_dpl ] && cp $dpaa2_mc_dpl $PACKAGES_PATH/apps/security/cst/dpl.dtb
+    fi
+    mkdir -p  $FBOUTDIR/firmware/secboot_hdrs/$1
+    cd $PACKAGES_PATH/apps/security/cst
+    if [ $2 = nand -a -n "$nand_script" ]; then
+	. $nand_script
+    elif [ $2 = sd -o $2 = emmc ] && [ -n "$sd_script" ]; then
+	. $sd_script
+    elif [ $2 = nor -a -n "$nor_script" ]; then
+	. $nor_script
+    elif [ $2 = qspi -a -n "$qspi_script" ]; then
+	. $qspi_script
+    elif [ $2 = xspi -a -n "$xspi_script" ]; then
+	. $xspi_script
+    fi
+
+    [ ${1:0:7} = ls1028a ] && cp $PACKAGES_PATH/apps/security/cst/secboot_hdrs.bin \
+    $FBOUTDIR/firmware/secboot_hdrs/$1/secboot_hdrs_${2}boot.bin || \
+    cp -f $PACKAGES_PATH/apps/security/cst/secboot_hdrs_${2}boot.bin $FBOUTDIR/firmware/secboot_hdrs/$1
+
+    [ ${1:0:7} = ls1021a -a $2 != nor ] && cp -f $PACKAGES_PATH/apps/security/cst/u-boot-with-spl-pbl-sec.bin $uboot_sdboot_sec
+
+    cp -f $PACKAGES_PATH/apps/security/cst/hdr_dtb.out $FBOUTDIR/firmware/secboot_hdrs/$1
+    cp -f $PACKAGES_PATH/apps/security/cst/hdr_linux.out $FBOUTDIR/firmware/secboot_hdrs/$1
+    [ $1 = ls1012afrwy ] && cp $PACKAGES_PATH/apps/security/cst/hdr_kernel.out $FBOUTDIR/firmware/secboot_hdrs/$1
+    cp  $PACKAGES_PATH/apps/security/cst/hdr_bs.out $FBOUTDIR/firmware/secboot_hdrs/$1/hdr_${1}_bs.out
+    cp -f $PACKAGES_PATH/apps/security/cst/srk_hash.txt $FBOUTDIR/images
+    cp -f $PACKAGES_PATH/apps/security/cst/srk.pri $FBOUTDIR/images
+    cp -f $PACKAGES_PATH/apps/security/cst/srk.pub $FBOUTDIR/images
+    [ "$ENCAP" = y ] && cp -f $PACKAGES_PATH/apps/security/cst/hdr_bs_dec.out \
+    $FBOUTDIR/firmware/secboot_hdrs/$1/hdr_${1}_bs_dec.out
+    if [ "$IMA_EVM" = y ]; then
+	cp -f $PACKAGES_PATH/apps/security/cst/hdr_bs_enf.out $FBOUTDIR/firmware/secboot_hdrs/$1/hdr_${1}_bs_enf.out
+	cp -f $PACKAGES_PATH/apps/security/cst/hdr_initramfs.out $FBOUTDIR/firmware/secboot_hdrs/$1/
+    fi
+
+    fbprint_d "sign image for $1 ${2}boot"
+}
+
+generate_composite_fw_2M() {
+    # generate machine-specific firmware to adapt to small footprint flash media, e.g. on LS1012A-FRWY
+    # $1: machine name
+    # $2: boot type: nor, sd, qspi, xspi, nand
+    # $3: bootloader type: uboot or uefi
+    # $4: optional argument, e.g. for 512mb
+
+    echo "Generating $2boot composite firmware image for $1 ..."
+    [ ! -f $FBDIR/configs/board/$1/manifest ] && echo $FBDIR/configs/board/$1/manifest not exist! && exit 1
+    . $FBDIR/configs/board/$1/manifest
+    if [ "$SECURE" = y ]; then
+	bl2img=`eval echo '${'"atf_bl2_""$2"'_sec}'`
+	fipimg=`eval echo '${'"atf_fip_""$3"'_sec}'`
+	fwimg=$FBOUTDIR/images/firmware_${1}_${3}_${2}boot_secure
+    else
+	bl2img=`eval echo '${'"atf_bl2_""$2"'}'`
+	fipimg=`eval echo '${'"atf_fip_""$3"'}'`
+	fwimg=$FBOUTDIR/images/firmware_${1}_${3}_${2}boot
+    fi
+
+    if [ "$4" = 512mb ]; then
+	if [ "$SECURE" = y ]; then
+	    fwimg=$FBOUTDIR/images/firmware_${1}_512mb_${3}_${2}boot_secure
+	    bl2img=$FBOUTDIR/firmware/atf/ls1012afrwy_512mb/bl2_$2_sec.pbl
+	    fipimg=$FBOUTDIR/firmware/atf/ls1012afrwy_512mb/fip_uboot_sec.bin
+	else
+	    fwimg=$FBOUTDIR/images/firmware_${1}_512mb_${3}_${2}boot
+	    bl2img=$FBOUTDIR/firmware/atf/ls1012afrwy_512mb/bl2_$2.pbl
+	    fipimg=$FBOUTDIR/firmware/atf/ls1012afrwy_512mb/fip_uboot.bin
+	fi
+    fi
+
+    [ -f $fwimg ] && rm -f $fwimg
+    [ -z "$bl2img" ] && echo ${3} ${2}boot on $1 based on ATF: unsupported! && exit
+    if [ ! -f $bl2img -o ! -f $fipimg ] || \
+       `cd $PACKAGES_PATH/firmware/atf && git status -s|grep -qiE 'M|A|D' && cd - 1>/dev/null`; then
+	[ "$SECURE" = y ] && flex-builder -c atf -m $1 -b $2 -s -f $CONFIGLIST || flex-builder -c atf -m $1 -b $2 -f $CONFIGLIST
+    fi
+
+
+    # 1. program ATF bl2
+    [ $2 = sd -o $2 = emmc ] && dd if=$bl2img of=$fwimg bs=512 seek=$sd2_rcw_offset || dd if=$bl2img of=$fwimg bs=1K seek=0
+
+    # 2. reserved
+
+    # 3. program Ethernet firmware,  e.g. PFE on LS1012A-FRWY
+    if [ -n "$pfe_fw" ]; then
+	test -f $pfe_fw || flex-builder -c pfe_bin -f $CONFIGLIST
+	if [ $2 = nor -o $2 = qspi -o $2 = xspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor2_eth_firmware_offset))) / 1024`
+	    dd if=$pfe_fw of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$pfe_fw of=$fwimg bs=512 seek=$sd2_eth_firmware_offset
+	fi
+    fi
+
+    # 4. ATF FIP image
+    if [ $2 = sd -o $2 = emmc ]; then
+	dd if=$fipimg of=$fwimg bs=512 seek=$sd2_fip_offset
+    else
+	val=`expr $(echo $(($nor2_fip_offset))) / 1024`
+	dd if=$fipimg of=$fwimg bs=1K seek=$val
+    fi
+
+    # 5. program bootloader environment varialbe
+    if [ $3 = uefi ] ; then
+	if [ -n "$uefi_env" ]; then
+	    if [ $2 = nor -o $2 = qspi -o $2 = xspi ]; then
+		val=`expr $(echo $(($nor2_bootloader_env_offset))) / 1024`
+		dd if=$uefi_env of=$fwimg bs=1K seek=$val
+	    elif [ $2 = sd -o $2 = emmc ]; then
+		dd if=$uefi_env of=$fwimg bs=512 seek=$sd2_bootloader_env_offset
+	    fi
+	fi
+    fi
+
+    # 6. flashing image script or reserved, 0x1E0000 64KB
+    [ -f $FBOUTDIR/images/flash_images.scr ] || \
+    mkimage -T script -C none -d $FBDIR/tools/flash_images.sh $FBOUTDIR/images/flash_images.scr
+    if [ $2 = nor -o $2 = qspi -o $2 = xspi ]; then
+        val=`expr $(echo $(($nor2_uboot_scr_offset))) / 1024`
+        dd if=$FBOUTDIR/images/flash_images.scr of=$fwimg bs=1K seek=$val
+    elif [ $2 = sd -o $2 = emmc ]; then
+        dd if=$FBOUTDIR/images/flash_images.scr of=$fwimg bs=512 seek=$sd2_uboot_scr_offset
+    fi
+
+    # 7. program secure boot headers
+    secureboot_headers=`eval echo '${'"secureboot_headers_""$2"'}'`
+    if [ -n "$secureboot_headers" -a "$SECURE" = y ]; then
+	[ -f $distro_bootscript ] || flex-builder -i mkdistroscr -m $1 -a $DESTARCH -f $CONFIGLIST
+	flex-builder -i signimg -m $1 -b $2 -a $DESTARCH -f $CONFIGLIST
+	if [ $2 = nor -o $2 = qspi -o $2 = nand ]; then
+	    val=`expr $(echo $(($nor2_secureboot_headers_offset))) / 1024`
+	    dd if=$secureboot_headers of=$fwimg bs=1K seek=$val
+	elif [ $2 = sd -o $2 = emmc ]; then
+	    dd if=$secureboot_headers of=$fwimg bs=512 seek=$sd2_secureboot_headers_offset
+	fi
+    fi
+
+    [ $2 = sd -o $2 = emmc ] &&	tail -c +4097 $fwimg > $fwimg.img && rm $fwimg || mv $fwimg $fwimg.img
+    echo -e "${GREEN} $fwimg.img   [Done]\n${NC}"
+}
+
+check_machine_boottype() {
+    [ -z "$BOOTTYPE" -a $SOCFAMILY = LS ] && echo "please specify -b parameter for BOOTTPYE" && exit 1
+    if [ $SOCFAMILY = LS ] && [ $BOOTTYPE != sd -a $BOOTTYPE != emmc -a $BOOTTYPE != nor -a \
+	 $BOOTTYPE != qspi -a $BOOTTYPE != xspi -a $BOOTTYPE != nand -a $BOOTTYPE != tfa ]; then
+	echo valid parameter of '-b': sd, emmc, qspi, xspi, nor, nand, tfa && exit 1
+    fi
+}
+
+check_proxy() {
+    aptfile=$1/etc/apt/apt.conf
+    for hproto in http https; do
+	hproxy=${hproto}_proxy && hproxy=`eval echo '${'"$hproto""_proxy"'}'`
+	if [ -n "$hproxy" ]; then
+	    [ -f $aptfile ] || sudo touch $aptfile
+	    if ! grep -q ^Acquire::$hproto::proxy $aptfile; then
+		echo "Acquire::$hproto::proxy \"$hproxy/\";" | sudo tee -a $aptfile 1>/dev/null
+	    fi
+	fi
+    done
+}
+
+check_ubuntu_version() {
+    minversion=18.04
+    if [[ ! -f /etc/os-release ]] || [[ ! `cat /etc/os-release | grep -iE '^ID=ubuntu|^ID=lsdk'` ]]; then
+	fbprint_e "The host is not Ubuntu $minversion system, please install docker and run 'flex-builder docker' to build in Docker" && exit
+    else
+	[ -f /usr/bin/lsb_release ] || sudo apt install -y lsb-release
+	[ ! -f /usr/bin/lsb_release ] && fbprint_e "lsb_release command is not found" && exit
+	releaseVersion=$(lsb_release -rs)
+	result=$(echo "$releaseVersion < $minversion" | bc)
+	if [ "$result" -eq "1" ]; then
+	    fbprint_e "The distro version installed on this host is older than Ubuntu $minversion"
+	    fbprint_e "please upgrade it or install docker and run 'flex-builder docker' to build in Docker" && exit
+	else
+	    check_binfmt_qemu
+	fi
+    fi
+}
+
+
+check_host_dependent_pkg() {
+    for pkg in $host_dependent_packages; do
+	if ! dpkg-query -l $pkg | grep -q ii; then
+	    [ "$aptupdatedone" != y ] && sudo apt autoclean && sudo apt update && aptupdatedone=y
+	    echo installing $pkg ... && sudo apt install -y $pkg
+	fi
+    done
+
+    if [ ! -f ~/.gitconfig ] || [[ ! `grep 'name =' ~/.gitconfig` ]]; then
+	fbprint_w "git configuration is not set in ~/.gitconfig yet, automatically setting it ..."
+	echo [user] > ~/.gitconfig
+	echo "        name = `whoami`" >> ~/.gitconfig
+	echo "        email = `whoami`@`hostname`.com" >> ~/.gitconfig
+	if [ -n "$http_proxy" ] && [[ ! `grep 'proxy =' ~/.gitconfig` ]]; then
+	    echo "[http]" >> ~/.gitconfig
+	    echo "        proxy = $http_proxy" >> ~/.gitconfig
+	    echo "[https]" >> ~/.gitconfig
+	    echo "        proxy = $https_proxy" >> ~/.gitconfig
+	fi
+    fi
+    check_build_toolchain && touch $FBDIR/logs/.deppkgdone
+}
+
+check_linux_config() {
+    if [ $DESTARCH = arm32 ]; then
+	tarch=arm
+    elif [ $DESTARCH = arm64 ]; then
+	tarch=arm64
+    elif [ $DESTARCH = ppc64 -o $DESTARCH = ppc32 ]; then
+	tarch=powerpc
+    fi
+    if [ -n "$FRAGMENT_CFG" ]; then
+	for cfg in $FRAGMENT_CFG; do
+	    [ -f $KERNEL_PATH/arch/$tarch/configs/$cfg ] || \
+	    cp -f $FBDIR/configs/linux/$cfg $KERNEL_PATH/arch/$tarch/configs
+	done
+    fi
+    rm -f $FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/{config*,System.map*,vmlinuz*}
+}
+
+do_clean() {
+    echo Cleaning $FBOUTDIR/firmware
+    rm -rf $FBOUTDIR/firmware
+    echo  Cleaning $FBOUTDIR/linux
+    rm -rf $FBOUTDIR/linux
+    echo Cleaning $FBOUTDIR/apps
+    sudo rm -rf $FBOUTDIR/apps
+    echo Cleaning $FBOUTDIR/images
+    rm -rf $FBOUTDIR/images
+    [ "$CONFIG_EIQ" = y ] && flex-builder -i clean-eiq -f $CONFIGLIST
+    fbprint_d "cleaned all old images except distro rootfs"
+}
+
+do_clean_rfs() {
+    if [ $DISTROTYPE = yocto ]; then
+	echo cleaning $yoctotmpdir ... && sudo rm -rf $yoctotmpdir
+	sudo rm -rf $FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_yocto_*
+	fbprint_d "clean $yoctotmpdir"
+    else
+	[ -c $RFSDIR/dev/pts/ptmx ] && sudo umount $RFSDIR/dev/pts || true
+	[ -f $RFSDIR/proc/uptime ] && sudo umount $RFSDIR/proc || true
+	sudo rm -rf $RFSDIR && rm -rf $FBOUTDIR/images/${RFSDIR##*/}*
+	fbprint_d "clean distro $RFSDIR"
+    fi
+}
+
+show_lists() {
+    echo -e "\nBuild Config:"
+    echo -e "\t$CONFIGLIST"
+    echo -e "\nEnabled Machine List:"
+    echo -e "\t$LS_MACHINE_LIST"
+    echo -e "\nEnabled Firmware Components List:"
+    echo -e "\t$FIRMWARE_REPO_LIST"
+    echo -e "\nEnabled App Components List:"
+    echo -e "\t$APPS_REPO_LIST"
+    echo -e "\nEnabled Linux Components List:"
+    echo -e "\t$LINUX_REPO_LIST"
+    echo -e "\nEnabled eIQ Components List:"
+    echo -e "\t$EIQ_REPO_LIST"
+}
+
+fbprint_e() {
+    echo -e "${RED} $1 ${NC}"
+}
+
+fbprint_n() {
+    echo -e "${green} $1 ${NC}"
+}
+
+fbprint_w() {
+    echo -e "${YELLOW} $1 ${NC}"
+}
+
+fbprint_d() {
+    echo -e "${GREEN} $1     [Done] ${NC}"
+}
+
+username=`whoami`
+HOSTARCH=`uname -m`
+red='\e[0;41m'
+RED='\e[1;31m'
+GREEN='\e[1;32m'
+green='\e[0;32m'
+yellow='\e[5;43m'
+YELLOW='\e[1;33m'
+NC='\e[0m'
+
+[ $# -eq 0 ] && usage && exit
+DESTARCH=arm64
+
+ARGS=$(getopt -a -o m:j:a:b:c:f:r:i:p:k:B:T:setvh \
+-l machine:,jobs:,arch:,boottype:,component:,cfgfile:,rootfs:,instruction:,portfolio:,buildarg:,cot:,secure,encap,ima-evm,keyid:,version,help -- "$@")
+
+[ $? -ne 0 ] && usage
+eval set -- "${ARGS}"
+while true
+do
+	case "$1" in
+	-m|--machine)
+		MACHINE=$2; echo "MACHINE: $MACHINE"; shift;;
+	-j|--jobs)
+		JOBS=$2; echo JOBS: $JOBS; shift;;
+	-a|--arch)
+		DESTARCH=$(echo $2 | cut -d: -f1)
+		ENDIANTYPE=$(echo $2 | cut -d: -f2)
+		[ "$ENDIANTYPE" = be ] && endiantype=_be && endianstr=:be
+		echo "DESTARCH: $DESTARCH"; shift;;
+	-b|boottype)
+		BOOTTYPE=$2; echo "BOOTTYPE: $BOOTTYPE"; shift;;
+	-c|--component)
+		COMPONENT=$2; echo "COMPONENT: $COMPONENT"; shift;;
+	-f|--cfgfile)
+		CONFIGLIST=$2
+		[ ! -f $FBDIR/configs/$CONFIGLIST ] && fbprint_e "$FBDIR/configs/$CONFIGLIST does not exist!" && exit 1
+		echo "CONFIGLIST: $2"; shift;;
+	-r|--rootfs)
+		DISTROTYPE=$(echo $2 | cut -d: -f1)
+		DISTROSCALE=$(echo $2 | cut -d: -f2)
+		CODENAME=$(echo $2 | cut -d: -f3)
+		DISTROSCALEOPT=$(echo $2 | cut -d: -f3)
+		if [ $DISTROSCALE = $DISTROTYPE ]; then DISTROSCALE=; fi
+		if [ "$CODENAME" = $DISTROTYPE ]; then CODENAME=; fi
+		if [ $DISTROTYPE = yocto -o $DISTROTYPE = buildroot ] && [ -z "$DISTROSCALE" ]; then DISTROSCALE=tiny; fi
+		if [ $DISTROTYPE != ubuntu -a $DISTROTYPE != debian -a $DISTROTYPE != centos -a \
+		     $DISTROTYPE != android -a $DISTROTYPE != buildroot -a $DISTROTYPE != yocto ]; then
+		    fbprint_e "invalid argument $DISTROTYPE for distro type, valid type: ubuntu, debian, centos, buildroot, yocto" && exit 1
+		fi
+		if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian -o $DISTROTYPE = centos ] && [ -n "$DISTROSCALE" -a "$DISTROSCALE" != main -a \
+		     "$DISTROSCALE" != devel -a "$DISTROSCALE" != cloud -a "$DISTROSCALE" != lite -a "$DISTROSCALE" != mate ]; then
+		    fbprint_e "invalid $DISTROSCALE for DISTROSCALE argument, valid: main, devel, lite, mate, cloud" && exit 1
+		elif [ $DISTROTYPE = buildroot -o $DISTROTYPE = yocto ] && [ "$DISTROSCALE" != tiny -a "$DISTROSCALE" != devel -a "$DISTROSCALE" != imaevm ]; then
+			fbprint_e "invalid $DISTROSCALE for DISTROSCALE argument, valid: tiny, devel, devel:custom, imaevm" && exit 1
+		fi
+		[ -z "$DISTROSCALE" ] && DISTROSCALE=main
+		echo DISTRO TYPE:  $DISTROTYPE
+		echo DISTRO SCALE: $DISTROSCALE
+		[ -n "$CODENAME" ] && echo DISTRO CODENAME: $CODENAME
+		shift;;
+	-i|--instruction)
+		INSTRUCTION=$2; echo "INSTRUCTION: $INSTRUCTION"; shift;;
+	-p|--portfolio)
+		PORTFOLIO=$2; echo "PORTFOLIO: $PORTFOLIO"; shift;;
+	-B|--buildarg)
+		BUILDARG=$2; echo "BUILDARG: $BUILDARG"; shift;;
+	-s|--secure)
+		SECURE=y && echo "SECURE: $SECURE" && secureopt="-s";;
+	-e|--encap)
+		ENCAP=y && SECURE=y && echo "ENCAP: $ENCAP" && secureopt="-e";;
+	-t|--ima-evm)
+		IMA_EVM=y && SECURE=y && imaevmopt="_imaevm" && echo "IMA_EVM: $IMA_EVM" && secureopt="-t";;
+	-T|--cot)
+		COT=$2 && SECURE=y && echo "COT: $COT" && secureopt="-s -T $COT"; shift;;
+	-k|--keyid)
+		KEY_ID=$2; echo "KEY_ID: $KEY_ID"; shift;;
+	-v|--version)
+		fbprint_n $FBVERSION; exit;;
+	-h|--help)
+		usage;;
+	--)
+		shift
+		break;;
+	esac
+shift
+done
+
+[ -z "$MACHINE" ] && MACHINE=all
+[ "${MACHINE:0:7}" = "ls1021a" ] && DESTARCH=arm32
+
+if [ "$MACHINE" = "imx6qsabresd" -o "$MACHINE" = "imx6qpsabresd" -o "$MACHINE" = "imx6sllevk" ]; then
+    DESTARCH=arm32 && PORTFOLIO=imx6
+elif [ "$MACHINE" = "imx7ulpevk" ]; then
+    DESTARCH=arm32 && PORTFOLIO=imx7
+elif [ "$MACHINE" = "imx8mqevk" -o "$MACHINE" = "imx8mmevk" -o "$MACHINE" = "imx8qmmek" -o \
+	"$MACHINE" = "imx8qxpmek" -o "$MACHINE" = "imx8mnevk" ]; then
+    DESTARCH=arm64 && PORTFOLIO=imx8
+fi
+[ -z "$PORTFOLIO" ] && PORTFOLIO=layerscape
+
+if [ $PORTFOLIO != layerscape  -a $PORTFOLIO != QORIQ -a $PORTFOLIO != LS -a $PORTFOLIO != IMX -a \
+    $PORTFOLIO != imx -a $PORTFOLIO != imx6 -a $PORTFOLIO != imx7 -a $PORTFOLIO != imx8 ]; then
+    fbprint_e "$PORTFOLIO is invalid, valid -p parameter is: layerscape, imx, imx6, imx7, imx8"; exit 1
+fi
+if [ $PORTFOLIO = IMX -o $PORTFOLIO = imx -o $PORTFOLIO = imx6 -o $PORTFOLIO = imx7 -o $PORTFOLIO = imx8 ]; then
+    SOCFAMILY=IMX
+    [ -z "$BOOTTYPE" ] && BOOTTYPE=sd
+elif [ $DESTARCH = ppc64 -o $DESTARCH = ppc32 ]; then
+    SOCFAMILY=QORIQ
+else
+    SOCFAMILY=LS
+fi
+
+if [ -z "$CONFIGLIST" ]; then
+    if [ -f $FBDIR/configs/build_custom.cfg ]; then
+	CONFIGLIST=build_custom.cfg
+    elif [ -f $FBDIR/configs/build_lsdk_internal.cfg ]; then
+	CONFIGLIST=build_lsdk_internal.cfg
+    else
+	CONFIGLIST=build_lsdk.cfg
+    fi
+fi
+export CONFIGLIST
+
+. $FBDIR/configs/$CONFIGLIST
+. $FBDIR/configs/centos/distro.cfg
+. $FBDIR/configs/ubuntu/additional_packages_list
+
+[ -z "$FBOUTDIR" ] && FBOUTDIR=$DEFAULT_OUT_PATH
+[ -z "$PACKAGES_PATH" ] && PACKAGES_PATH=$DEFAULT_PACKAGES_PATH
+export FBOUTDIR PACKAGES_PATH && mkdir -p $FBOUTDIR $PACKAGES_PATH
+
+[ "$MACHINE" = qemuarm64 -o "$MACHINE" = qemuarm -o "$MACHINE" = qemuppc -o "$MACHINE" = qemuppc64 ] && manifest=""
+[ -f $FBDIR/configs/board/$MACHINE/manifest ] && manifest=$FBDIR/configs/board/$MACHINE/manifest
+[ -n "$manifest" ] && . $manifest
+. $FBDIR/configs/board/common/memorylayout.cfg
+
+[ $DESTARCH = arm64 ] && kernelname=Image && SOCARCH=aarch64 && SYSARCH=arm64
+[ $DESTARCH = arm32 ] && kernelname=zImage && SOCARCH=arm && SYSARCH=armhf
+[ ${DESTARCH:0:3} = ppc ] && kernelname=Image.gz && SOCARCH=powerpc && SYSARCH=ppc64el
+kernel_img=$FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY/$kernelname
+
+if [ $DESTARCH != arm64 -a $DESTARCH != arm32 -a $DESTARCH != ppc64 -a $DESTARCH != ppc32 ]; then
+    fbprint_e "invalid $DESTARCH, valid arch: arm64, arm32, ppc64, ppc32" && exit 1
+fi
+
+if [ -n "`echo $COMPONENT | grep ^linux:`" -a -n "`echo $COMPONENT | cut -d: -f3`" ]; then
+    KERNEL_TREE=`echo $COMPONENT|cut -d: -f2`
+    KERNEL_BRANCH=`echo $COMPONENT|cut -d: -f3`
+else
+    KERNEL_TREE=$default_linux_tree
+    KERNEL_BRANCH=$linux_repo_branch
+fi
+
+if [ -n "`echo $COMPONENT | grep ^uboot:`" -a -n "`echo $COMPONENT | cut -d: -f3`" ]; then
+    UBOOT_TREE=`echo $COMPONENT|cut -d: -f2`
+    UBOOT_BRANCH=`echo $COMPONENT|cut -d: -f3`
+else
+    if [ $SOCFAMILY = IMX ]; then
+	UBOOT_TREE=$default_uboot_imx_tree
+	UBOOT_BRANCH=$default_uboot_imx_repo_branch
+    else
+	UBOOT_TREE=$default_uboot_tree
+	UBOOT_BRANCH=$uboot_repo_branch
+    fi
+fi
+
+RCW_TREE=$default_rcw_tree
+KERNEL_PATH=$PACKAGES_PATH/linux/$KERNEL_TREE
+KERNEL_OUTPUT_PATH=$FBOUTDIR/linux/$KERNEL_TREE/$DESTARCH/$SOCFAMILY/output
+INSTALL_MOD_PATH=$FBOUTDIR/linux/kernel/$DESTARCH/$SOCFAMILY
+
+BIN_FW="fm_ucode qe_ucode phy_cortina phy_inphi pfe_bin ddr_phy_bin dp_firmware_cadence"
+LS_MACHINE_LIST=`grep CONFIG_MACHINE_L $FBDIR/configs/$CONFIGLIST |grep y|cut -b 16-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+IMX_MACHINE_LIST=`grep CONFIG_MACHINE_IMX $FBDIR/configs/$CONFIGLIST |grep y|cut -b 16-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+FIRMWARE_REPO_LIST=`grep CONFIG_FW_ $FBDIR/configs/$CONFIGLIST |grep y|cut -b 11-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+FIRMWARE_REPO_LIST="$FIRMWARE_REPO_LIST $BIN_FW"
+LINUX_ALL_LIST=`grep CONFIG_KERL_ $FBDIR/configs/$CONFIGLIST |cut -b 13-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+LINUX_REPO_LIST=`grep CONFIG_KERL_ $FBDIR/configs/$CONFIGLIST |grep y|cut -b 13-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+APPS_ALL_LIST=`grep CONFIG_APP_ $FBDIR/configs/$CONFIGLIST |cut -b 12-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+APPS_ALL_LIST=`echo $APPS_ALL_LIST | sed -e 's/optee/optee optee_os optee_client optee_test/'`
+APPS_REPO_LIST=`grep CONFIG_APP_ $FBDIR/configs/$CONFIGLIST |grep y|cut -b 12-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+APPS_REPO_LIST=`echo $APPS_REPO_LIST | sed -e 's/optee/optee_os optee_client optee_test/'`
+EIQ_ALL_LIST=`grep CONFIG_EIQ_ $FBDIR/configs/$CONFIGLIST |cut -b 12-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+EIQ_REPO_LIST=`grep CONFIG_EIQ_ $FBDIR/configs/$CONFIGLIST |grep y|cut -b 12-|tr A-Z a-z|cut -d= -f1|tr "\n" " "`
+
+[ -z "$DISTROTYPE" -a ${DESTARCH:0:3} = arm ] && DISTROTYPE=ubuntu
+[ -z "$DISTROTYPE" -a ${DESTARCH:0:3} = ppc ] && DISTROTYPE=buildroot
+if [ -z "$DISTROSCALE" ] && [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian -o $DISTROTYPE = centos ]; then
+    DISTROSCALE=main
+elif [ -z "$DISTROSCALE" ] && [ $DISTROTYPE = yocto -o $DISTROTYPE = buildroot ]; then
+    DISTROSCALE=tiny
+fi
+if [ -z "$CODENAME" -a $DISTROTYPE = ubuntu ]; then
+    [ -n "$distro_codename" ] && CODENAME=$distro_codename || CODENAME=bionic
+elif [ -z "$CODENAME" -a $DISTROTYPE = debian ]; then
+    CODENAME=stretch
+fi
+
+if [ $DISTROTYPE = ubuntu -o $DISTROTYPE = debian ]; then
+    [ $DISTROSCALE = mate -a $DESTARCH != arm64 -a $DESTARCH != arm32 ] && fbprint_e "arch $DESTARCH is not supported for ubuntu-mate yet" && exit
+    [ -z "$DISTROSCALE" ] && [ $CONFIG_APP_OPENSTACK_NOVA = y ] && DISTROSCALE=cloud
+    [ $SOCFAMILY = IMX ] && socopt="_imx"
+    RFSDIR=$FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH}$socopt
+elif [ $DISTROTYPE = buildroot ]; then
+    RFSDIR=$FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_buildroot_${DISTROSCALE}_${DESTARCH}${endiantype}/target
+elif [ $DISTROTYPE = yocto ]; then
+    [ $DESTARCH != arm64 -a $DESTARCH != arm32 -a $DESTARCH != ppc32 -a $DESTARCH != ppc64 ] && fbprint_e "arch $DESTARCH is not supported for yocto yet" && exit
+    [ $DISTROSCALE = tiny ] && yoctoimgtype=core-image-minimal || yoctoimgtype=core-image-sato
+    [ $DESTARCH = arm32 ] && machinetype=qemuarm-poky-linux-gnueabi 
+    [ $DESTARCH = arm64 ] && machinetype=qemuarm64-poky-linux
+    [ $DESTARCH = ppc32 ] && machinetype=qemuppc-poky-linux
+    [ $DESTARCH = ppc64 ] && machinetype=qemuppc64-poky-linux
+    yoctotmpdir=`grep '^TMPDIR =' $FBDIR/configs/yocto/local_${DESTARCH}_${DISTROSCALE}.conf | cut -d' ' -f3 | cut -d'"' -f2`
+    yoctotmpdir=`eval echo $yoctotmpdir`
+    RFSDIR=$yoctotmpdir/work/$machinetype/$yoctoimgtype/1.0-r0/rootfs
+elif [ $DISTROTYPE = centos ]; then
+    RFSDIR=$FBOUTDIR/rfs/rootfs_${DISTRIB_VERSION}_centos_${centos_version}_${DESTARCH}
+elif [ $DISTROTYPE = android ]; then
+    RFSDIR=$FBOUTDIR/rfs/rootfs_android_${android_version}_${DESTARCH}
+fi
+
+if [ $DISTROTYPE = buildroot ]; then
+    DESTDIR=$FBOUTDIR/apps/components_${SOCFAMILY}_${DESTARCH}_buildroot
+elif [ $DISTROTYPE = yocto ]; then
+    DESTDIR=$FBOUTDIR/apps/components_${SOCFAMILY}_${DESTARCH}_yocto
+else
+    [ "$BUILDARG" = eiq ] && postfix=_eIQ
+    DESTDIR=$FBOUTDIR/apps/components_${SOCFAMILY}_${DESTARCH}_ubuntu${postfix}
+fi
+linux_itb=$FBOUTDIR/images/${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${SOCFAMILY}_${DESTARCH}.itb
+tiny_itb=$FBOUTDIR/images/${DISTRIB_VERSION}_yocto_tiny_${SOCFAMILY}_${DESTARCH}.itb
+initrdimg=$PACKAGES_PATH/rfs/initrd/rootfs_${DISTRIB_VERSION}_${DISTROTYPE}_${DISTROSCALE}_${DESTARCH}.cpio.gz
+
+mkdir -p $DESTDIR/{etc,opt}
+mkdir -p $DESTDIR/usr/{bin,include}
+mkdir -p $DESTDIR/usr/local/{bin,include,lib}
+mkdir -p $FBOUTDIR/{firmware,linux,rfs,images}
+mkdir -p $PACKAGES_PATH/rfs/initrd
+mkdir -p $FBDIR/logs
+
+if [ ! $(echo $JOBS | grep '^[0-9]\{1,2\}$' | grep '^[1-9]') ]; then
+   fbprint_e "invalid parameter $JOBS for JOBS, valid range: 1 to 99" && exit
+fi
+
+if [ "$COMPONENT" = uboot -o "$COMPONENT" = firmware ]; then
+    [ -z "$MACHINE" ] && fbprint_e "please specify -m parameter (machine name or all)" && exit 1
+fi
+
+if [ $MACHINE != all ]; then
+    if ! grep -q -i MACHINE_${MACHINE}= $FBDIR/configs/$CONFIGLIST; then
+	if [ $PORTFOLIO != imx6 -a $PORTFOLIO != imx7 -a $PORTFOLIO != imx8 ] && \
+	   [ $MACHINE != qemuarm64 -a $MACHINE != qemuarm -a $MACHINE != qemuppc -a $MACHINE != qemuppc64 ]; then
+	    fbprint_e "Incorrect machine name: $MACHINE"
+	    fbprint_n "Valid LS machine name: $LS_MACHINE_LIST"
+	    fbprint_n "Valid i.MX machine name: $IMX_MACHINE_LIST" && exit 1
+	fi
+    fi
+fi
+
+if [ -n "$MACHINE" ]; then
+    [ ${MACHINE:0:7} = ls1021a ] && export ARCH=arm && export DESTARCH=arm32
+fi
+[ $DESTARCH = arm32 ] && export ARCH=arm
+
+if [ $DESTARCH = arm64 -a "$SOCFAMILY" = "LS" ]; then
+    KERNEL_CFG=$linux_config_list_arm64_ls
+elif [ $DESTARCH = arm32 -a "$SOCFAMILY" = "LS" ]; then
+    KERNEL_CFG=$linux_config_list_arm32_ls
+elif [ $DESTARCH = arm64 -a "$SOCFAMILY" = "IMX" ]; then
+    KERNEL_CFG=$linux_config_list_arm64_imx
+elif [ $DESTARCH = arm32 -a "$SOCFAMILY" = "IMX" ]; then
+    KERNEL_CFG=$linux_config_list_arm32_imx
+elif [ $DESTARCH = ppc64 ]; then
+    KERNEL_CFG=$linux_config_list_ppc64
+elif [ $DESTARCH = ppc32 ]; then
+    KERNEL_CFG=$linux_config_list_ppc32
+fi
+
+[ ! -L $FBOUTDIR/linux/kernel ] && ln -s $KERNEL_TREE $FBOUTDIR/linux/kernel
+
+if [ ! -f $FBDIR/logs/.checkproxydone ]; then
+    if [[ ! `grep Ubuntu /etc/issue` ]] && [[ ! `grep 'NXP LSDK' /etc/issue` ]]; then
+	if [ "$1" != "docker" ]; then
+	    fbprint_e "This host is not based on Ubuntu distro, please install docker and run 'flex-builder docker' to build in docker"
+	    exit
+	fi
+    fi
+    if ! grep -q fbubuntu /etc/hosts; then
+	echo 127.0.0.1   fbubuntu | sudo tee -a /etc/hosts 1>/dev/null
+    fi
+    check_proxy && touch $FBDIR/logs/.checkproxydone
+fi
+
+if [ "$1" = docker ]; then
+    if ! which docker 1>/dev/null 2>&1; then
+	fbprint_e "make sure docker is properly installed on the host machine!"; exit
+    fi
+    if ! docker ps  1>/dev/null 2>&1; then
+	fbprint_e "make sure you can run \'docker ps\' if you are in a docker group"; exit
+    fi
+    [ $HOSTARCH = x86_64 -o $HOSTARCH = i686 ] && check_binfmt_qemu
+    [ ! -b /dev/loop0 ] && sudo losetup -f
+    flexbuild_launch_docker; exit
+elif [ "$1" = connect ]; then
+    host_connect_target $2 $3; exit
+elif [ "$1" = disconnect ]; then
+    host_disconnect_target $2; exit
+elif [ "$1" = push ]; then
+    host_push_image_to_target $2 $3; exit
+fi
+
+[ $HOSTARCH = x86_64 -o $HOSTARCH = i686 ] && [ ! -f $FBDIR/logs/.deppkgdone ] && check_ubuntu_version && check_host_dependent_pkg
+
+tmppath=$(realpath $FBOUTDIR/linux/kernel)
+[ ${tmppath##*/} != $KERNEL_TREE ] && rm -f $FBOUTDIR/linux/kernel && ln -s $KERNEL_TREE $FBOUTDIR/linux/kernel
+
+[ -z "$MACHINE" ] && MACHINE=all
+if [ $MACHINE = all -a $SOCFAMILY = LS -a $DESTARCH = arm64 ]; then
+    machinelist=$(echo $LS_MACHINE_LIST | sed s/ls1021atwr//)
+elif [ $MACHINE = all -a $SOCFAMILY = LS -a $DESTARCH = arm32 ]; then
+    machinelist=ls1021atwr
+elif [ $MACHINE = all -a $SOCFAMILY = IMX ]; then
+    machinelist=$IMX_MACHINE_LIST
+else
+    machinelist=$MACHINE
+fi
+
+if [ -z "$BOOTTYPE" -o "$BOOTTYPE" = all ]; then
+    boottypelist="sd nor qspi xspi nand emmc"
+elif [ $BOOTTYPE != all -a $BOOTTYPE != sd -a $BOOTTYPE != emmc -a $BOOTTYPE != nor -a $BOOTTYPE != qspi -a $BOOTTYPE != xspi -a $BOOTTYPE != nand -a $BOOTTYPE != tfa ]; then
+    fbprint_e "invalid boottype: $BOOTTYPE, valid: sd, qspi, xspi, nor, emmc, nand" && exit 1
+else
+    boottypelist=$BOOTTYPE
+fi
+
+[ "$BUILDARG" = uefi ] && BL33TYPE=uefi || BL33TYPE=uboot
+
+[[ `grep 'Microsoft.com' /proc/version` ]] &&  VIRTABLE=n || VIRTABLE=y
+
+case $BUILDARG in
+    verbose)
+	MAKE_FLAGS=-w;;
+    quiet)
+	MAKE_FLAGS=-s;;
+    keep-going)
+	MAKE_FLAGS=-k;;
+esac
+MAKE="make $MAKE_FLAGS"
+
+export ARCH DESTARCH CROSS_COMPILE FBDIR DESTDIR RFSDIR JOBS COMPONENT MACHINE KERNEL_TREE KERNEL_BRANCH KERNEL_PATH CONFIGLIST \
+       RCW_TREE UBOOT_TREE UBOOT_BRANCH BUILDARG MAKE MAKE_FLAGS KERNEL_CFG INSTALL_MOD_PATH LS_MACHINE_LIST FIRMWARE_REPO_LIST \
+       APPS_REPO_LIST APPS_ALL_LIST LINUX_REPO_LIST LINUX_ALL_LIST BIN_FW BOOTTYPE DISTROTYPE DISTROSCALE DISTROSCALEOPT HOSTARCH \
+       ENDIANTYPE SECURE PORTFOLIO IMX_MACHINE_LIST SOCFAMILY KERNEL_OUTPUT_PATH BL33TYPE DISTRIB_NAME DISTRIB_VERSION VIRTABLE \
+       EIQ_ALL_LIST EIQ_REPO_LIST FIRMWARE_REPO_LIST LS_MACHINE_LIST SOCARCH SYSARCH COT tiny_itb
+
+case "$INSTRUCTION" in
+    repo-fetch)
+	git_repo_update fetch; exit;;
+    repo-update)
+	git_repo_update latest;	exit;;
+    repo-commit)
+	git_repo_update commit; exit;;
+    repo-tag)
+	git_repo_update tag; exit;;
+    repo-branch)
+	git_repo_update branch; exit;;
+esac
+
+check_build_toolchain
+
+if [ "$1" = all ]; then
+    if [ "$BUILD_LAYERSCAPE_IMAGE" = "y" ]; then
+	flex-builder -i autobuild -a arm32 -p layerscape -f $CONFIGLIST
+	flex-builder -i autobuild -a arm64 -p layerscape -f $CONFIGLIST
+    fi
+    if [ "$BUILD_IMX_IMAGE" = "y" ]; then
+	flex-builder -i autobuild -a arm32 -p imx -f $CONFIGLIST
+	flex-builder -i autobuild -a arm64 -p imx -f $CONFIGLIST
+    fi
+    exit
+elif [ "$1" = clean ]; then
+    do_clean && exit
+elif [ "$1" = "clean-rfs" ]; then
+    do_clean_rfs && exit
+fi
+
+if [ -z "$COMPONENT" -a -z "$INSTRUCTION" -a -n "$MACHINE" -a $MACHINE != all ]; then
+    [ -z "$BOOTTYPE" ] && flex-builder -i auto -m $MACHINE -a $DESTARCH -f $CONFIGLIST || \
+    flex-builder -i auto -m $MACHINE -b $BOOTTYPE -a $DESTARCH -f $CONFIGLIST
+    exit
+fi
+
+
+case "$INSTRUCTION" in
+    mkfw)
+	generate_composite_firmware; exit;;
+    mkallfw)
+	generate_all_composite_fw; exit;;
+    mkdistroscr)
+	for brd in $machinelist; do
+	    generate_distro_bootscr $brd
+	done
+	exit;;
+    mkflashscr)
+	mkimage -T script -C none -d $FBDIR/tools/flash_images.sh $FBOUTDIR/images/flash_images.scr
+	fbprint_d "$FBOUTDIR/images/flash_images.scr"; exit;;
+    signimg)
+	[ -z "$BOOTTYPE" ] && BOOTTYPE=all
+	[ "$BOOTTYPE" != all ] && check_machine_boottype
+	[ $MACHINE = all ] && brdlist=$machinelist || brdlist=$MACHINE
+	for brd in $brdlist; do
+	    for boottype in $boottypelist; do
+		[ $brd = lx2160ardb_rev2 -o $brd = lx2160aqds_rev2 -o $brd = ls1088ardb_pb ] && brdname=${brd:0:10} || brdname=$brd
+		secure_sign_image $brdname $boottype
+	    done
+	done
+	exit;;
+    mkrfs)
+	generate_distro_rfs; exit;;
+    download)
+        download_distro_images; exit;;
+    rfsraw2ext)
+	convert_rfs_raw_to_ext4; exit;;
+    packrfs)
+	pack_distro_rfs; exit;;
+    packapp|packapps)
+	pack_app_components; exit;;
+    mklinux|mkitb)
+	generate_linux_itb; exit;;
+    mkcpio)
+        generate_initrd_cpio; exit;;
+    mktoolchain)
+	build_distro_rfs_buildroot toolchain $DESTARCH; exit;;
+    mkboot|mkbootpartition)
+	[ $DESTARCH = ppc64 ] && . $FBDIR/configs/board/t2080rdb/manifest
+	generate_bootpartition_tarball; exit;;
+    auto|autobuild)
+	flex_autobuild_all; exit;;
+    auto_build)
+        flex_auto_build; exit;;
+    clean-rfs)
+	do_clean_rfs; exit;;
+    clean-firmware)
+	[ -d $FBOUTDIR/firmware ] && rm -rf $FBOUTDIR/firmware && fbprint_d "clean $FBOUTDIR/firmware"
+	exit;;
+    clean-linux)
+	[ -d $FBOUTDIR/linux ] && rm -rf $FBOUTDIR/linux && fbprint_d "clean $FBOUTDIR/linux"
+	exit;;
+    clean-apps)
+	[ -d $DESTDIR ] && rm -rf $DESTDIR && fbprint_d "clean $DESTDIR"; exit;;
+    clean-eiq)
+        make eiq_clean -C $PACKAGES_PATH/apps; exit;;
+    install-eiq)
+        make eiq_install -C $PACKAGES_PATH/apps; exit;;
+    clean)
+	do_clean; exit;;
+    merge-component)
+	merge_components; exit;;
+    list)
+	show_lists; exit;;
+    compile)
+	;;
+    *)
+	if [ -n "$INSTRUCTION" ]; then
+	    fbprint_e "invalid instruction: $INSTRUCTION" && exit
+	fi ;;
+esac
+
+case $COMPONENT in
+    rcw|uboot|u-boot|uefi)
+	make -C $FBDIR/packages/firmware $COMPONENT;;
+    linux|Linux|kernel|linux:custom)
+	if echo "$BUILDARG" | grep -q fragment:; then
+	    export FRAGMENT_CFG=$(echo $BUILDARG | cut -d: -f2);
+	fi
+	if echo $COMPONENT|grep -q :custom; then
+	    export BUILDARG=custom
+	fi
+	check_linux_config
+	make -C $FBDIR linux;;
+    linux:*:*|uboot:*:*)
+	component=`echo $COMPONENT | cut -d: -f1`
+	repo=`echo $COMPONENT | cut -d: -f2`
+	branch=`echo $COMPONENT | cut -d: -f3`
+	repostr=$(echo $repo | sed s/-/_/g)
+	repourl=`eval echo '${'"$repostr"'_repo_url}'`
+	if  [ $component = linux ]; then
+	    KERNEL_TREE=$repo && KERNEL_BRANCH=$branch && pkgdir=$PACKAGES_PATH/linux
+	    tmppath=`realpath $FBOUTDIR/linux/kernel`
+	    [ ${tmppath##*/} != $KERNEL_TREE ] && rm -f $FBOUTDIR/linux/kernel && ln -s $KERNEL_TREE $FBOUTDIR/linux/kernel
+	    mkdir -p $FBOUTDIR/linux/$KERNEL_TREE
+	elif [ $component = uboot ]; then
+	    UBOOT_TREE=$repo && UBOOT_BRANCH=$branch && pkgdir=$PACKAGES_PATH/firmware
+	fi
+	if [ ! -d $pkgdir/$repo ]; then
+	    if [ "$repo" = linux -o "$repo" = linux-lts-nxp -o "$repo" = linux-nxp -o \
+		 "$repo" = u-boot -o "$repo" = dash-uboot ]; then
+		[ -n "$repourl" ] && urlstr=$repourl || urlstr=$GIT_REPOSITORY_URL/$repo
+		cd $pkgdir && git clone $urlstr && cd -
+	    else
+		fbprint_e "Please first clone repository $repo to $pkgdir!" && exit 1
+	    fi
+	fi
+	[ -d $pkgdir/$repo ] && cd $pkgdir/$repo || { fbprint_e "$pkgdir/$repo not exist"; exit; }
+	if [ ! -f Makefile ]; then
+	    # no need with remotes/origin in case of using tag
+	    git checkout remotes/origin/$branch -b $branch 2>/dev/null || git checkout $branch -b $branch
+	fi
+	if [ "$BUILD_DUAL_KERNEL" = y -a -f Makefile ] && \
+	   [ "$branch" = "$linux_repo_tag" -o "$branch" = "$linux_repo_branch" -o \
+	   "$branch" = "$second_linux_repo_tag" -o "$branch" = "$second_linux_repo_branch" ]; then
+	    if git show-ref --verify --quiet refs/heads/$branch; then
+		git checkout $branch
+	    else
+		git checkout remotes/origin/$branch -b $branch 2>/dev/null || git checkout $branch -b $branch
+	    fi
+	fi
+	if ! git branch -a | grep -q $branch && ! git tag | grep -q $branch; then
+	   fbprint_e "invalid tag/branch name: $branch" && exit 1
+	fi
+	if git show-ref --verify --quiet refs/heads/$branch; then
+	    git checkout $branch
+	else
+	    git checkout remotes/origin/$branch -b $branch 2>/dev/null || git checkout $branch -b $branch
+	fi
+	cd $FBDIR && check_linux_config && make $component;;
+    atf)
+	[ -z "$BUILDARG" ] && BUILDARG=uboot
+	[ $BUILDARG != uboot -a $BUILDARG != uefi ] && fbprint_e "invalid -B option: only uboot or uefi is valid for BL33!" && exit 1
+	make -C $FBDIR atf;;
+    initrd)
+	get_prebuilt_initrd;;
+    all)
+        fbprint_e "invalid component name: all, run 'flex-builder -h' for help" && exit;;
+    apps|initrd|bin_firmware|imx_atf)
+	make -C $FBDIR $COMPONENT
+	[ $COMPONENT = apps ] && touch $FBOUTDIR/apps/.app${DESTARCH}$DISTROTYPE;;
+    $COMPONENT)
+	[ -z "$COMPONENT" ] && fbprint_e "invalid instruction" && exit
+	check_component_valid $COMPONENT
+	make -C $FBDIR $COMPONENT;;
+    *)
+	exit;;
+esac
