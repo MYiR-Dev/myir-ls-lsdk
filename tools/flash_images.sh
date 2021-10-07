@@ -155,6 +155,29 @@ elif test $board = ls1028ardb; then
     efs="$filesize"
     erase_cmd="sf erase"
     write_cmd="sf write"
+elif test $board = ls1028amyir; then
+    if test -z "$bl2_img"; then
+        bl2_img=$image_path/bl2_flexspi_nor.pbl
+    fi
+    if test -z "$fip_img"; then
+        fip_img=$image_path/fip_uboot.bin
+    fi
+    if test -z "$dp_img"; then
+        dp_img=/flash_images/ls1028a-dp-fw.bin
+    fi
+    if test -z "$phy_img"; then
+        phy_img=/flash_images/in112525-phy-ucode.txt
+    fi
+    if test -z "$dtb_img"; then
+        dtb_img=/myd-ls1028a.dtb
+    fi
+    if test -z "$flash_type"; then
+        flash_type=flexspi_nor
+    fi
+    pt_off_cmd="echo sf protect unlock"
+    efs="$filesize"
+    erase_cmd="sf erase"
+    write_cmd="sf write"
 elif test $board = ls1043ardb; then
     if test -z "$bl2_img"; then
 	bl2_img=$image_path/bl2_nor.pbl

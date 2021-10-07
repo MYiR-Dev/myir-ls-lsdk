@@ -40,3 +40,6 @@ fi
 if ! grep -q mali-dp /etc/modules; then
     echo mali-dp >> /etc/modules
 fi
+if ! grep -q snd_soc_sgtl5000 /etc/modules; then
+	    echo snd_soc_sgtl5000 >> /etc/modules
+    fi

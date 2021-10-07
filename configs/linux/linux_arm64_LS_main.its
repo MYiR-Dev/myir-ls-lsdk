@@ -13,7 +13,7 @@
 	images {
 		kernel {
 			description = "ARM64 Kernel";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/Image.gz");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/Image.gz");
 			type = "kernel";
 			arch = "arm64";
 			os = "linux";
@@ -27,7 +27,7 @@
 
 		initrd {
 			description = "initrd for arm64";
-			data = /incbin/("../../packages/rfs/initrd/rootfs_yocto_arm64_tiny.cpio.gz");
+			data = /incbin/("../../packages/rfs/initrd/rootfs_lsdk2012_ubuntu_main_arm64.cpio.gz");
 			type = "ramdisk";
 			arch = "arm64";
 			os = "linux";
@@ -41,7 +41,7 @@
 
 		ls1012ardb-dtb {
 			description = "ls1012ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1012a-rdb.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1012a-rdb.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -54,7 +54,7 @@
 
 		ls1012aqds-dtb {
 			description = "ls1012aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1012a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1012a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -67,7 +67,7 @@
 
 		ls1012afrwy-dtb {
 			description = "ls1012afrwy-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1012a-frwy.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1012a-frwy.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -80,7 +80,7 @@
 
 		ls1028amyir-dtb {
 			description = "ls1028amyir-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1028a-myir.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/myd-ls1028a.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -93,7 +93,7 @@
 
 		ls1028aqds-dtb {
 			description = "ls1028aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1028a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1028a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -106,7 +106,7 @@
 
 		ls1043ardb-dtb {
 			description = "ls1043ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1043a-rdb-sdk.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1043a-rdb-sdk.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -120,7 +120,7 @@
 
 		ls1043aqds-dtb {
 			description = "ls1043aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1043a-qds-sdk.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1043a-qds-sdk.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -133,7 +133,7 @@
 
 		ls1046ardb-dtb {
 			description = "ls1046ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1046a-rdb-sdk.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1046a-rdb-sdk.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -146,7 +146,7 @@
 
 		ls1046aqds-dtb {
 			description = "ls1046aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1046a-qds-sdk.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1046a-qds-sdk.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -160,7 +160,7 @@
 		ls1046afrwy-dtb {
 
 			description = "ls1046afrwy-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1046a-frwy-sdk.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1046a-frwy-sdk.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -173,7 +173,7 @@
 
 		ls1088ardb-dtb {
 			description = "ls1088ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1088a-rdb.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1088a-rdb.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -186,7 +186,7 @@
 
 		ls1088aqds-dtb {
 			description = "ls1088aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls1088a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls1088a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -199,7 +199,7 @@
 
 		ls2088ardb-dtb {
 			description = "ls2088ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls2088a-rdb.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls2088a-rdb.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -212,7 +212,7 @@
 
 		ls2088aqds-dtb {
 			description = "ls2088aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-ls2088a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-ls2088a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -225,7 +225,7 @@
 
 		lx2160ardb-dtb {
 			description = "lx2160ardb-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-lx2160a-rdb.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-lx2160a-rdb.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -238,7 +238,7 @@
 
 		lx2160aqds-dtb {
 			description = "lx2160aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-lx2160a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-lx2160a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
@@ -252,7 +252,7 @@
 
 		lx2162aqds-dtb {
 			description = "lx2162aqds-dtb";
-			data = /incbin/("../../build/linux/kernel/arm64/LS/fsl-lx2162a-qds.dtb");
+			data = /incbin/("/home/wujl/ls1028/flexbuild_lsdk2012/build/linux/kernel/arm64/LS/fsl-lx2162a-qds.dtb");
 			type = "flat_dt";
 			arch = "arm64";
 			os = "linux";
