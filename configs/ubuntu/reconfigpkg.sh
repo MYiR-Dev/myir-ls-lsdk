@@ -40,6 +40,16 @@ fi
 if ! grep -q mali-dp /etc/modules; then
     echo mali-dp >> /etc/modules
 fi
+
 if ! grep -q snd_soc_sgtl5000 /etc/modules; then
 	echo snd_soc_sgtl5000 >> /etc/modules
-    fi
+fi
+
+if ! grep -q flexcan /etc/modules; then
+	echo flexcan >> /etc/modules
+fi
+
+
+if ! grep -q lm90 /etc/modules; then
+	echo lm90 >> /etc/modules
+fi
