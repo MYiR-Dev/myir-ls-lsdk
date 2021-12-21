@@ -12,8 +12,8 @@ atf_bl2_sd_sec=$FBOUTDIR/firmware/atf/ls1028amyir/bl2_sd_sec.pbl
 atf_bl2_emmc=$FBOUTDIR/firmware/atf/ls1028amyir/bl2_emmc.pbl
 atf_fip_uboot=$FBOUTDIR/firmware/atf/ls1028amyir/fip_uboot.bin
 atf_fip_uboot_sec=$FBOUTDIR/firmware/atf/ls1028amyir/fip_uboot_sec.bin
-secureboot_headers_xspi=$FBOUTDIR/firmware/secboot_hdrs/ls1028ardb/secboot_hdrs_xspiboot.bin
-secureboot_headers_sd=$FBOUTDIR/firmware/secboot_hdrs/ls1028ardb/secboot_hdrs_sdboot.bin
+secureboot_headers_xspi=$FBOUTDIR/firmware/secboot_hdrs/ls1028amyir/secboot_hdrs_xspiboot.bin
+secureboot_headers_sd=$FBOUTDIR/firmware/secboot_hdrs/ls1028amyir/secboot_hdrs_sdboot.bin
 dp_firmware=$FBOUTDIR/firmware/dp_firmware_cadence/dp/ls1028a-dp-fw.bin
 
 # [linux, dtb, rfs]

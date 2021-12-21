@@ -23,3 +23,4 @@ include $(FBDIR)/packages/apps/generic/generic.mk
 include $(FBDIR)/packages/apps/security/security.mk
 include $(FBDIR)/packages/apps/networking/networking.mk
 include $(FBDIR)/packages/apps/multimedia/multimedia.mk
+include $(FBDIR)/packages/apps/myir/myir.mk

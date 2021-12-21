@@ -21,7 +21,8 @@ additional_main_packages_list="apt apt-utils git gcc vim wget make build-essenti
   ca-certificates libnl-genl-3-dev libreadline-dev libffi-dev libudev-dev libinput-dev libpixman-1-dev
   libxkbcommon-dev libpng-dev libcairo2-dev libpam0g-dev lsb-release kexec-tools iptables rsync
   liblua5.3-dev parted strongswan dmidecode libsystemd-dev libxcb-composite0-dev libxcursor-dev
-  libtinfo-dev util-linux lvm2"
+  libtinfo-dev util-linux lvm2 udhcpc madplay i2c-tools memtester evtest iperf3 v4l-utils eog can-utils microcom sqlite3 udhcpd glmark2-es2-wayland"
+
 
 
 
